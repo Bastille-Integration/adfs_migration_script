@@ -177,18 +177,26 @@ $password = ConvertTo-SecureString (Get-Secret -Name "AdfsNewCertPassword") -AsP
 
 ## SSL Certificate Binding
 
-After calling `Set-AdfsSslCertificate`, the script reads back the bindings via `Get-AdfsSslCertificate` and displays the result for every `hostname:port` entry:
+`Set-AdfsSslCertificate` updates the ADFS configuration store, but the TLS handshake itself is served by **HTTP.SYS** — a kernel-level binding that is managed separately. If that binding is not updated, `openssl s_client` (and any connecting client) will still see the old certificate even though ADFS reports success.
+
+The script handles this in two stages:
+
+**Stage 1 — ADFS cmdlet:**
+Calls `Set-AdfsSslCertificate -Thumbprint` and reads back all bindings via `Get-AdfsSslCertificate`, tagging each as `OK` or `STALE`:
 
 ```
 [OK   ] adfs.newdomain.com:443          ->  <new thumbprint>
 [STALE] certauth.adfs.newdomain.com:443 ->  <old thumbprint>
 ```
 
-A `STALE` binding means the cmdlet ran without error but that entry still shows the old thumbprint. This typically resolves once the ADFS service restarts (which the script performs immediately after).
+**Stage 2 — HTTP.SYS direct update (automatic if Stage 1 has stale entries):**
+Runs `netsh http show sslcert` to read all kernel-level bindings, finds any whose certificate hash does not match the new thumbprint, then deletes and re-adds each one with the new hash. Both `ipport` (e.g. `0.0.0.0:443`) and `hostnameport` (e.g. `adfs.newdomain.com:443`) binding types are handled. The original `AppId` and certificate store name are preserved.
+
+After the ADFS service restarts, `openssl s_client` should show the new certificate.
 
 ### Private key permissions
 
-A common cause of `Get-AdfsSslCertificate` continuing to show the old certificate — even after a successful `Set-AdfsSslCertificate` call — is that the ADFS service account (`NT SERVICE\adfssrv`) lacks read access to the imported private key. The script grants this permission automatically immediately after the PFX is imported.
+A common cause of `Set-AdfsSslCertificate` appearing to succeed but the old certificate remaining in use is that the ADFS service account (`NT SERVICE\adfssrv`) lacks read access to the imported private key. The script grants this permission automatically immediately after the PFX is imported.
 
 ---
 
