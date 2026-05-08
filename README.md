@@ -124,6 +124,43 @@ The script will auto-detect the old and new host suffixes and prompt for confirm
 
 ---
 
+## PFX Password Handling
+
+The script handles password-protected PFX files automatically without requiring the password to be passed upfront.
+
+### Behavior
+
+| Scenario | Result |
+|---|---|
+| `-PfxPassword` provided, correct | Imports immediately |
+| `-PfxPassword` provided, incorrect | Fails with the underlying error from the certificate store |
+| No password supplied, PFX is unprotected | Imports immediately |
+| No password supplied, PFX is password-protected, interactive mode | Prompts once at runtime; exits cleanly if left blank |
+| No password supplied, PFX is password-protected, `-NonInteractive` | Exits with a clear error directing you to use `-PfxPassword` |
+
+### Supplying the password upfront
+
+Pass a `SecureString` via `-PfxPassword`. The recommended way to do this interactively is:
+
+```powershell
+.\Install-ADFS-pfx-Redirects.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -PfxPassword (Read-Host "PFX Password" -AsSecureString)
+```
+
+For scripted/automated deployments, load the password from a secrets store rather than hardcoding it:
+
+```powershell
+$password = ConvertTo-SecureString (Get-Secret -Name "AdfsNewCertPassword") -AsPlainText -Force
+
+.\Install-ADFS-pfx-Redirects.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -PfxPassword $password `
+    -NonInteractive
+```
+
+---
+
 ## Auto-Detection Behavior
 
 ### New host suffix
