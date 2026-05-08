@@ -311,6 +311,44 @@ function Import-PfxToLocalMachineMy {
     return ,$newCerts
 }
 
+function Grant-CertPrivateKeyReadAccess {
+    param(
+        $Cert,
+        [string]$Account
+    )
+
+    try {
+        $privateKey = $Cert.PrivateKey
+        if ($null -eq $privateKey) {
+            Write-Warning "Certificate has no accessible private key — skipping ACL update for '$Account'."
+            return
+        }
+
+        $keyContainerName = $privateKey.CspKeyContainerInfo.UniqueKeyContainerName
+        $keyPath = Join-Path "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys" $keyContainerName
+
+        if (-not (Test-Path -LiteralPath $keyPath)) {
+            Write-Warning "Private key file not found at '$keyPath' — skipping ACL update for '$Account'."
+            return
+        }
+
+        $acl = Get-Acl -Path $keyPath
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $Account,
+            [System.Security.AccessControl.FileSystemRights]::Read,
+            [System.Security.AccessControl.InheritanceFlags]::None,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.AddAccessRule($rule)
+        Set-Acl -Path $keyPath -AclObject $acl
+        Write-Host "Granted private key read access to: $Account" -ForegroundColor Green
+    }
+    catch {
+        Write-Warning "Failed to grant private key access to '$Account': $($_.Exception.Message)"
+    }
+}
+
 function Get-BestLeafCertificate {
     param([array]$Certificates)
 
@@ -908,6 +946,10 @@ if (-not [string]::IsNullOrWhiteSpace($summary.DnsNameList)) {
     Write-Host ("  DNS Names     : {0}" -f $summary.DnsNameList)
 }
 
+Write-Host ""
+Write-Host "Granting ADFS service account read access to private key..." -ForegroundColor Cyan
+Grant-CertPrivateKeyReadAccess -Cert $leafCert -Account "NT SERVICE\adfssrv"
+
 if (-not [string]::IsNullOrWhiteSpace($ExpectedDnsName)) {
     Write-Host ""
     Write-Host "Checking certificate name match..." -ForegroundColor Cyan
@@ -1075,13 +1117,44 @@ else {
 
 if (-not $SkipAdfsSsl) {
     Write-Host ""
-    Write-Host "About to set AD FS SSL certificate to thumbprint:" -ForegroundColor Cyan
-    Write-Host "  $thumbprint"
+    Write-Host "AD FS SSL certificate update..." -ForegroundColor Cyan
+    Write-Host "  New thumbprint: $thumbprint"
+
+    try {
+        $currentSslBindings = @(Get-AdfsSslCertificate -ErrorAction Stop)
+        if ($currentSslBindings.Count -gt 0) {
+            Write-Host "Current SSL bindings:" -ForegroundColor Gray
+            foreach ($binding in $currentSslBindings) {
+                $marker = if ($binding.CertificateHash -ieq $thumbprint) { " [already set]" } else { "" }
+                Write-Host ("  {0}:{1}  ->  {2}{3}" -f $binding.HostName, $binding.PortNumber, $binding.CertificateHash, $marker)
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not read current SSL bindings: $($_.Exception.Message)"
+        $currentSslBindings = @()
+    }
 
     if (Confirm-Action "Apply AD FS SSL certificate change? (y/n)") {
         try {
             Set-AdfsSslCertificate -Thumbprint $thumbprint -ErrorAction Stop
-            Write-Host "AD FS SSL certificate updated successfully." -ForegroundColor Green
+
+            $updatedBindings = @(Get-AdfsSslCertificate -ErrorAction SilentlyContinue)
+            $stale = @($updatedBindings | Where-Object { $_.CertificateHash -ine $thumbprint })
+
+            if ($stale.Count -eq 0) {
+                Write-Host "AD FS SSL certificate updated successfully." -ForegroundColor Green
+            }
+            else {
+                Write-Host "SSL certificate set, but some bindings still show the old thumbprint:" -ForegroundColor Yellow
+                foreach ($binding in $updatedBindings) {
+                    $isCurrent = $binding.CertificateHash -ieq $thumbprint
+                    $status = if ($isCurrent) { "OK   " } else { "STALE" }
+                    $color  = if ($isCurrent) { "Green" } else { "Yellow" }
+                    Write-Host ("  [{0}] {1}:{2}  ->  {3}" -f $status, $binding.HostName, $binding.PortNumber, $binding.CertificateHash) -ForegroundColor $color
+                }
+                Write-Host "Stale bindings may resolve after the ADFS service restarts." -ForegroundColor Yellow
+            }
         }
         catch {
             Write-Host "AD FS SSL update failed: $($_.Exception.Message)" -ForegroundColor Red
