@@ -1242,6 +1242,14 @@ if (-not $SkipAdfsSsl) {
         $currentSslBindings = @()
     }
 
+    # Snapshot old thumbprints now so we can target only ADFS-owned bindings later
+    $oldSslThumbprints = @(
+        $currentSslBindings |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_.CertificateHash) -and $_.CertificateHash -ine $thumbprint } |
+        ForEach-Object { $_.CertificateHash } |
+        Sort-Object -Unique
+    )
+
     if (Confirm-Action "Apply AD FS SSL certificate change? (y/n)") {
         try {
             Set-AdfsSslCertificate -Thumbprint $thumbprint -ErrorAction Stop
@@ -1267,11 +1275,11 @@ if (-not $SkipAdfsSsl) {
                 try {
                     $httpSysBindings = @(Get-HttpSysSslBindings)
                     $staleHttpSys = @($httpSysBindings | Where-Object {
-                        $_.CertHash -and $_.CertHash -ine $thumbprint
+                        $_.CertHash -and $oldSslThumbprints -contains $_.CertHash
                     })
 
                     if ($staleHttpSys.Count -eq 0) {
-                        Write-Host "No stale HTTP.SYS bindings found." -ForegroundColor Yellow
+                        Write-Host "No stale HTTP.SYS bindings found for old certificate." -ForegroundColor Yellow
                     }
                     else {
                         foreach ($b in $staleHttpSys) {
@@ -1286,6 +1294,33 @@ if (-not $SkipAdfsSsl) {
         }
         catch {
             Write-Host "AD FS SSL update failed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+
+        # Final sweep: delete any remaining HTTP.SYS bindings still referencing the old cert
+        if ($oldSslThumbprints.Count -gt 0) {
+            try {
+                $remainingOld = @(Get-HttpSysSslBindings | Where-Object {
+                    $_.CertHash -and $oldSslThumbprints -contains $_.CertHash
+                })
+
+                if ($remainingOld.Count -gt 0) {
+                    Write-Host ""
+                    Write-Host "Removing remaining stale HTTP.SYS bindings for old certificate..." -ForegroundColor Cyan
+                    foreach ($b in $remainingOld) {
+                        $typeArg = "$($b.Type)=$($b.Binding)"
+                        & netsh http delete sslcert $typeArg 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host ("  Removed [{0}] {1}" -f $b.Type, $b.Binding) -ForegroundColor Green
+                        }
+                        else {
+                            Write-Host ("  Failed to remove [{0}] {1}" -f $b.Type, $b.Binding) -ForegroundColor Yellow
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Warning "Failed to clean up remaining stale bindings: $($_.Exception.Message)"
+            }
         }
     }
     else {

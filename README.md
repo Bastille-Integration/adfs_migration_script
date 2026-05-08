@@ -190,7 +190,10 @@ Calls `Set-AdfsSslCertificate -Thumbprint` and reads back all bindings via `Get-
 ```
 
 **Stage 2 — HTTP.SYS direct update (automatic if Stage 1 has stale entries):**
-Runs `netsh http show sslcert` to read all kernel-level bindings, finds any whose certificate hash does not match the new thumbprint, then deletes and re-adds each one with the new hash. Both `ipport` (e.g. `0.0.0.0:443`) and `hostnameport` (e.g. `adfs.newdomain.com:443`) binding types are handled. The original `AppId` and certificate store name are preserved.
+Before the update, the script snapshots the old ADFS certificate thumbprints from the current bindings. If stale entries remain after Stage 1, it runs `netsh http show sslcert`, finds any binding whose hash matches a known old ADFS thumbprint, and deletes and re-adds it with the new hash. Targeting is limited to the old ADFS thumbprints specifically — IIS or other services sharing the machine are not touched. Both `ipport` (e.g. `0.0.0.0:443`) and `hostnameport` (e.g. `adfs.newdomain.com:443`) binding types are handled. The original `AppId` and certificate store name are preserved.
+
+**Stage 3 — Final cleanup:**
+After Stage 2, the script performs one final sweep via `netsh http show sslcert` and deletes any remaining bindings still referencing the old certificate thumbprint. This catches any entry that could not be re-added and ensures no stale binding is left on the system.
 
 After the ADFS service restarts, `openssl s_client` should show the new certificate.
 
