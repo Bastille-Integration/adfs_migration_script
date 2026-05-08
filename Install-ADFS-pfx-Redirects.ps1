@@ -349,6 +349,57 @@ function Grant-CertPrivateKeyReadAccess {
     }
 }
 
+function Get-HttpSysSslBindings {
+    $output = @(& netsh http show sslcert 2>&1)
+    $bindings = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $current = $null
+
+    foreach ($line in $output) {
+        if ($line -match '^\s+IP:port\s*:\s*(.+)$') {
+            if ($null -ne $current) { [void]$bindings.Add($current) }
+            $current = [PSCustomObject]@{ Type = 'ipport'; Binding = $Matches[1].Trim(); CertHash = $null; AppId = $null; Store = 'MY' }
+        }
+        elseif ($line -match '^\s+Hostname:port\s*:\s*(.+)$') {
+            if ($null -ne $current) { [void]$bindings.Add($current) }
+            $current = [PSCustomObject]@{ Type = 'hostnameport'; Binding = $Matches[1].Trim(); CertHash = $null; AppId = $null; Store = 'MY' }
+        }
+        elseif ($null -ne $current) {
+            if      ($line -match '^\s+Certificate Hash\s*:\s*(.+)$')       { $current.CertHash = $Matches[1].Trim() }
+            elseif  ($line -match '^\s+Application ID\s*:\s*(.+)$')         { $current.AppId    = $Matches[1].Trim() }
+            elseif  ($line -match '^\s+Certificate Store Name\s*:\s*(.+)$') {
+                $s = $Matches[1].Trim()
+                if ($s -ne '(null)') { $current.Store = $s }
+            }
+        }
+    }
+    if ($null -ne $current) { [void]$bindings.Add($current) }
+
+    return ,$bindings.ToArray()
+}
+
+function Update-HttpSysSslBinding {
+    param(
+        $Binding,
+        [string]$NewThumbprint
+    )
+
+    $typeArg = "$($Binding.Type)=$($Binding.Binding)"
+
+    & netsh http delete sslcert $typeArg 2>&1 | Out-Null
+
+    $result = @(& netsh http add sslcert $typeArg `
+        certhash=$NewThumbprint `
+        appid=$($Binding.AppId) `
+        certstorename=$($Binding.Store) 2>&1)
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host ("  Updated [{0}] {1}" -f $Binding.Type, $Binding.Binding) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  Failed [{0}] {1}: {2}" -f $Binding.Type, $Binding.Binding, ($result -join ' ')) -ForegroundColor Red
+    }
+}
+
 function Get-BestLeafCertificate {
     param([array]$Certificates)
 
@@ -1209,7 +1260,28 @@ if (-not $SkipAdfsSsl) {
                     $color  = if ($isCurrent) { "Green" } else { "Yellow" }
                     Write-Host ("  [{0}] {1}:{2}  ->  {3}" -f $status, $binding.HostName, $binding.PortNumber, $binding.CertificateHash) -ForegroundColor $color
                 }
-                Write-Host "Stale bindings may resolve after the ADFS service restarts." -ForegroundColor Yellow
+
+                Write-Host ""
+                Write-Host "Updating stale HTTP.SYS bindings directly via netsh..." -ForegroundColor Cyan
+
+                try {
+                    $httpSysBindings = @(Get-HttpSysSslBindings)
+                    $staleHttpSys = @($httpSysBindings | Where-Object {
+                        $_.CertHash -and $_.CertHash -ine $thumbprint
+                    })
+
+                    if ($staleHttpSys.Count -eq 0) {
+                        Write-Host "No stale HTTP.SYS bindings found." -ForegroundColor Yellow
+                    }
+                    else {
+                        foreach ($b in $staleHttpSys) {
+                            Update-HttpSysSslBinding -Binding $b -NewThumbprint $thumbprint
+                        }
+                    }
+                }
+                catch {
+                    Write-Host "netsh binding update failed: $($_.Exception.Message)" -ForegroundColor Red
+                }
             }
         }
         catch {
