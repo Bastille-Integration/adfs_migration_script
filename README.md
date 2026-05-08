@@ -1,4 +1,234 @@
-# ADFS PFX Certificate & Redirect URI Migration Script
+# ADFS PFX Deployment Scripts
+
+Two scripts are provided depending on the deployment scenario:
+
+| Script | Purpose |
+|---|---|
+| `Install-ADFS-pfx-From_Scratch.ps1` | Fresh ADFS deployment — installs the Windows feature, configures the farm, creates AD groups and users, registers all Bastille application groups, and applies access control policies. |
+| `Install-ADFS-pfx-Redirects.ps1` | Certificate migration — replaces an existing ADFS self-signed certificate with a PFX and updates all hostname references. |
+
+---
+
+# Install-ADFS-pfx-From_Scratch.ps1
+
+Performs a complete first-time ADFS configuration for the Bastille Platform using a PFX certificate.
+
+## Requirements
+
+- Must be run **as Administrator** on the target ADFS node
+- Windows Server with Server Manager available (`Get-WindowsFeature`)
+- Windows PowerShell with the `ADFS` module available (installed automatically with the feature)
+- The **Active Directory** PowerShell module (`RSAT-AD-PowerShell`) for AD group and user creation
+- A valid `.pfx` file containing the new certificate and its private key
+
+---
+
+## What It Does
+
+The script performs the following steps in order:
+
+1. **Installs the ADFS-Federation Windows feature** (skippable with `-SkipWindowsFeature`).
+2. **Imports the PFX** into `Cert:\LocalMachine\My` and selects the best leaf certificate.
+3. **Grants the ADFS service account** (`NT SERVICE\adfssrv`) read access to the imported private key.
+4. **Resolves the Federation Service Name** from a SAN segment containing `adfs`, or from `-FederationServiceName`.
+5. **Installs the ADFS farm** via `Install-AdfsFarm`.
+6. **Binds the SSL certificate** and verifies HTTP.SYS bindings directly via `netsh`.
+7. **Sets the Service Communications certificate**.
+8. **Configures CORS trusted origins** from cert SANs.
+9. **Creates AD security groups** — `Bastille Admins` and `Bastille Users` (skippable with `-SkipAdGroups`).
+10. **Creates test AD users** and assigns them to groups (opt-in with `-CreateTestUsers`):
+    - `BN Test` → `Bastille Admins`
+    - `BN User` → `Bastille Users`
+11. **Registers Bastille application groups** in ADFS — one Application Group per product, each with a Native Client Application, a Web API Application, OAuth2 scopes (`openid`, `profile`), and issuance transform claim rules.
+12. **Applies access control policies** on each Web API:
+    - `Bastille Admin`, `Bastille ADAM`, `Bastille ADAM API` → Permit `Bastille Admins` only
+    - `Bastille DVR and Device` → Permit `Bastille Admins` and `Bastille Users`
+13. **Restarts the ADFS service**.
+
+### Registered Application Groups
+
+| Application Group | Client ID | Service Labels | Permitted Groups |
+|---|---|---|---|
+| Bastille Admin | `bastille-admin` | `admin` | Bastille Admins |
+| Bastille DVR and Device | `bastille-dvr-device` | `dvr`, `device` | Bastille Admins, Bastille Users |
+| Bastille ADAM | `bastille-adam` | `explorer` | Bastille Admins |
+| Bastille ADAM API | `bastille-adam-api` | `wti` | Bastille Admins |
+
+Redirect URIs are built at runtime by resolving each service label against the certificate SANs. See [SAN Label Matching](#san-label-matching) below.
+
+### Callback URLs
+
+The following callback URLs are registered per application group, with hostnames resolved from the certificate SANs:
+
+**Admin Console**
+- `https://<admin-host>/authenticated`
+- `https://<admin-host>/signin-callback`
+- `https://<admin-host>/signout-callback`
+
+**DVR Console**
+- `https://<dvr-host>/authenticated`
+- `https://<dvr-host>/signin-callback`
+- `https://<dvr-host>/signout-callback`
+
+**Device Dashboard**
+- `https://<device-host>/authenticated`
+- `https://<device-host>/signin-callback`
+- `https://<device-host>/signout-callback`
+
+**ADAM Explorer**
+- `https://<explorer-host>/auth-callback`
+- `https://<explorer-host>/authenticated`
+- `https://<explorer-host>/signin-callback`
+- `https://<explorer-host>/signout-callback`
+
+**ADAM API**
+- `https://<wti-host>/authenticated`
+- `https://<wti-host>/signin-callback`
+- `https://<wti-host>/signout-callback`
+
+### Claim Rules
+
+The following issuance transform rules are applied to every Web API application:
+
+**UPN rule** — issues the user's UPN and group memberships as role claims:
+```
+@RuleName = "UPN"
+c:[Type == "...windowsaccountname", Issuer == "AD AUTHORITY"]
+ => issue(store = "Active Directory",
+          types = ("...upn", "...role"),
+          query = ";userPrincipalName,tokenGroups;{0}", param = c.Value);
+```
+
+**Groups-Roles rule** — issues AD token groups as role claims:
+```
+@RuleName = "Groups-Roles"
+c:[Type == "...windowsaccountname", Issuer == "AD AUTHORITY"]
+ => issue(store = "Active Directory",
+          types = ("...role"),
+          query = ";tokenGroups;{0}", param = c.Value);
+```
+
+---
+
+## Usage
+
+```powershell
+.\Install-ADFS-pfx-From_Scratch.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -ServiceAccountCredential (Get-Credential)
+```
+
+### With a Group Managed Service Account (gMSA)
+
+```powershell
+.\Install-ADFS-pfx-From_Scratch.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -GroupServiceAccountIdentifier "DOMAIN\adfssvc$"
+```
+
+### With a password-protected PFX
+
+```powershell
+.\Install-ADFS-pfx-From_Scratch.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -PfxPassword (Read-Host "PFX Password" -AsSecureString) `
+    -ServiceAccountCredential (Get-Credential)
+```
+
+### Create test users and place groups in a specific OU
+
+```powershell
+.\Install-ADFS-pfx-From_Scratch.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -ServiceAccountCredential (Get-Credential) `
+    -AdGroupsOu "OU=Bastille,OU=Groups,DC=domain,DC=com" `
+    -CreateTestUsers `
+    -AdUsersOu  "OU=Bastille,OU=Users,DC=domain,DC=com"
+```
+
+### Non-interactive (scripted deployment)
+
+```powershell
+.\Install-ADFS-pfx-From_Scratch.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -ServiceAccountCredential $cred `
+    -NonInteractive
+```
+
+### Skip steps that have already been completed
+
+```powershell
+.\Install-ADFS-pfx-From_Scratch.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -ServiceAccountCredential (Get-Credential) `
+    -SkipWindowsFeature `
+    -SkipAdGroups
+```
+
+---
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `-PfxPath` | `string` | Yes | Path to the `.pfx` file to import. |
+| `-PfxPassword` | `SecureString` | No | Password for the PFX. Prompted at runtime if omitted and the file requires one. |
+| `-FederationServiceName` | `string` | No | ADFS federation service hostname. Auto-detected from a SAN segment containing `adfs` if omitted. |
+| `-FederationServiceDisplayName` | `string` | No | Display name for the federation service. Defaults to `"ADFS Federation Service"`. |
+| `-ServiceAccountCredential` | `PSCredential` | — | Service account credential. Mutually exclusive with `-GroupServiceAccountIdentifier` and `-UseNetworkService`. |
+| `-GroupServiceAccountIdentifier` | `string` | — | gMSA identifier (e.g. `DOMAIN\adfssvc$`). Mutually exclusive with the other service account options. |
+| `-UseNetworkService` | `switch` | — | Use `NT AUTHORITY\Network Service`. Mutually exclusive with the other service account options. |
+| `-OverrideServiceAccount` | `switch` | No | Pass `-OverrideServiceAccount` to `Install-AdfsFarm`. Required when using a local or non-domain account. |
+| `-NoExportable` | `switch` | No | Import the certificate as non-exportable. Exportable by default. |
+| `-SkipWindowsFeature` | `switch` | No | Skip the ADFS-Federation feature installation check. |
+| `-SkipAdGroups` | `switch` | No | Skip creation of `Bastille Admins` and `Bastille Users` AD security groups. |
+| `-CreateTestUsers` | `switch` | No | Create `BN Test` and `BN User` AD accounts and assign them to their groups. |
+| `-AdGroupsOu` | `string` | No | OU distinguished name for group creation. Default AD container if omitted. |
+| `-AdUsersOu` | `string` | No | OU distinguished name for user creation. Default AD container if omitted. |
+| `-SkipAppRegistration` | `switch` | No | Skip ADFS application group and Web API registration. |
+| `-SkipAccessControlPolicies` | `switch` | No | Skip per-group access control policies on Web API applications (leaves `"Permit everyone"`). |
+| `-SkipCors` | `switch` | No | Skip CORS trusted origins configuration. |
+| `-NonInteractive` | `switch` | No | Suppress all confirmation prompts. |
+
+### Service account — exactly one required
+
+| Option | When to use |
+|---|---|
+| `-ServiceAccountCredential` | Standard domain user account |
+| `-GroupServiceAccountIdentifier` | Group Managed Service Account (gMSA) |
+| `-UseNetworkService` | `NT AUTHORITY\Network Service` (lab/dev only) |
+
+---
+
+## SAN Label Matching
+
+Redirect URIs and CORS origins are resolved at runtime by matching service labels against the certificate SANs. The script extracts the first dot-segment of each SAN, splits it by hyphen, and checks whether the service label appears as a segment.
+
+Example — cert SANs include `wids-admin-site01.newdomain.com`:
+
+| Service label | Matched SAN |
+|---|---|
+| `admin` | `wids-admin-site01.newdomain.com` |
+| `dvr` | `wids-dvr-site01.newdomain.com` |
+| `device` | `wids-device-site01.newdomain.com` |
+| `explorer` | `wids-explorer-site01.newdomain.com` |
+| `wti` | `wids-wti-site01.newdomain.com` |
+
+If no SAN matches a label, that application group's redirect URIs are skipped with a warning.
+
+---
+
+## Important Notes
+
+- **One service account parameter is required.** The script exits immediately if none or more than one is supplied.
+- **The AD module must be available** for group and user creation steps. If `Get-ADGroup` / `New-ADGroup` are not available, use `-SkipAdGroups` and create the groups manually before running, or install `RSAT-AD-PowerShell`.
+- **Access control policies resolve group SIDs at runtime** using `NTAccount.Translate`. The AD groups must exist (created in Step 11 or pre-existing) before the app registration step runs. Use `-SkipAccessControlPolicies` if the groups are not yet available.
+- **ADFS service restart is always performed** at the end of the script. Plan for a brief service interruption.
+- The script requires PowerShell to be running as Administrator.
+
+---
+
+# Install-ADFS-pfx-Redirects.ps1
 
 Replaces an ADFS self-signed certificate with a PFX-based certificate and migrates all associated hostname references — native app redirect URIs, CORS trusted origins, and Federation Service Properties — from an old domain suffix to the new one encoded in the certificate.
 
