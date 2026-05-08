@@ -243,7 +243,8 @@ function Import-PfxToLocalMachineMy {
     param(
         [string]$FilePath,
         [SecureString]$Password,
-        [bool]$Exportable
+        [bool]$Exportable,
+        [bool]$NonInteractive = $false
     )
 
     if (-not (Test-Path -LiteralPath $FilePath)) {
@@ -279,7 +280,19 @@ function Import-PfxToLocalMachineMy {
             throw
         }
 
-        $params.Remove('Password') | Out-Null
+        # Passwordless attempt failed — PFX may be password-protected
+        if ($NonInteractive) {
+            Stop-Script "PFX import failed and no password was provided. Use -PfxPassword to supply one."
+        }
+
+        Write-Host "PFX import failed without a password. The file may be password-protected." -ForegroundColor Yellow
+        $promptedPassword = Read-Host "Enter PFX password" -AsSecureString
+
+        if (Get-SecureStringIsEmpty -Value $promptedPassword) {
+            Stop-Script "No password entered. Cannot import PFX."
+        }
+
+        $params['Password'] = $promptedPassword
         $imported = Import-PfxCertificate @params
     }
 
@@ -869,7 +882,7 @@ Write-Host ""
 Write-Host "Importing PFX into Cert:\LocalMachine\My ..." -ForegroundColor Cyan
 
 try {
-    $importedCerts = Import-PfxToLocalMachineMy -FilePath $PfxPath -Password $PfxPassword -Exportable:$exportable
+    $importedCerts = Import-PfxToLocalMachineMy -FilePath $PfxPath -Password $PfxPassword -Exportable:$exportable -NonInteractive:$NonInteractive
 }
 catch {
     Stop-Script "PFX import failed: $($_.Exception.Message)"
