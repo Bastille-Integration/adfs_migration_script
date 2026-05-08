@@ -542,6 +542,48 @@ function Replace-HostUsingSans {
     return $builder.Uri.AbsoluteUri
 }
 
+function Resolve-HostnameFromSans {
+    param(
+        [string]$OldHostname,
+        [string[]]$SanNames,
+        [string]$OldSuffix
+    )
+
+    if ([string]::IsNullOrWhiteSpace($OldHostname)) { return $null }
+
+    $oldHost = $OldHostname.Trim().ToLowerInvariant()
+
+    if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
+        $oldSuffixNorm = $OldSuffix.Trim().ToLowerInvariant()
+        if ($oldHost -ne $oldSuffixNorm -and -not $oldHost.EndsWith('.' + $oldSuffixNorm)) {
+            return $null
+        }
+    }
+
+    $serviceLabel = ($oldHost -split '\.')[0]
+    $bestMatch = $null
+    $bestScore = -1
+
+    foreach ($san in $SanNames) {
+        $sanFirstLabel = ($san -split '\.')[0].ToLowerInvariant()
+        $sanSegments = @($sanFirstLabel -split '-')
+        if ($sanSegments -contains $serviceLabel) {
+            $score = 1000 - $sanFirstLabel.Length
+            if ($score -gt $bestScore) {
+                $bestScore = $score
+                $bestMatch = $san
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($bestMatch)) {
+        Write-Warning "No matching SAN found for hostname '$OldHostname' (service label: '$serviceLabel')"
+    }
+
+    return $bestMatch
+}
+
+
 function Convert-ToCorsOrigin {
     param([string]$UriString)
 
@@ -708,7 +750,8 @@ function Update-NativeAppRedirects {
 function Update-FederationServiceProperties {
     param(
         [string]$OldSuffix,
-        [string]$NewSuffix
+        [string]$NewSuffix,
+        [string[]]$SanNames = @()
     )
 
     try {
@@ -737,9 +780,22 @@ function Update-FederationServiceProperties {
         }
     }
 
+    # DisplayName is human-readable text — suffix swap is sufficient
     $newDisplayName = Replace-SuffixInText -Text $currentDisplayName -OldSuffix $OldSuffix -NewSuffix $NewSuffix
-    $newHostName = Replace-SuffixInText -Text $currentHostName -OldSuffix $OldSuffix -NewSuffix $NewSuffix
-    $newIdentifier = Replace-SuffixInText -Text $currentIdentifier -OldSuffix $OldSuffix -NewSuffix $NewSuffix
+
+    # HostName and Identifier contain hostnames that must exist in the cert SANs
+    if ($SanNames.Count -gt 0) {
+        $newHostName = Resolve-HostnameFromSans -OldHostname $currentHostName -SanNames $SanNames -OldSuffix $OldSuffix
+
+        $newIdentifier = $null
+        if (-not [string]::IsNullOrWhiteSpace($currentIdentifier)) {
+            $newIdentifier = Replace-HostUsingSans -UriString $currentIdentifier -SanNames $SanNames -OldSuffix $OldSuffix
+        }
+    }
+    else {
+        $newHostName = Replace-SuffixInText -Text $currentHostName -OldSuffix $OldSuffix -NewSuffix $NewSuffix
+        $newIdentifier = Replace-SuffixInText -Text $currentIdentifier -OldSuffix $OldSuffix -NewSuffix $NewSuffix
+    }
 
     $changes = @()
 
@@ -1077,7 +1133,7 @@ else {
 }
 
 if (-not $SkipFederationServiceProperties) {
-    Update-FederationServiceProperties -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix
+    Update-FederationServiceProperties -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames
 }
 else {
     Write-Host ""
