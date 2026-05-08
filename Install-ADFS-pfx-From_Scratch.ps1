@@ -29,11 +29,80 @@ param(
 
     [switch]$SkipWindowsFeature,
 
+    [switch]$SkipAdGroups,
+
+    # Creates BN Test / BN User accounts and assigns them to their groups
+    [switch]$CreateTestUsers,
+
+    # Optional OU paths for AD object creation; default container if omitted
+    [string]$AdGroupsOu,
+    [string]$AdUsersOu,
+
     [switch]$SkipAppRegistration,
+
+    # Skip applying per-group access control policies on Web API applications
+    [switch]$SkipAccessControlPolicies,
 
     [switch]$SkipCors,
 
     [switch]$NonInteractive
+)
+
+# ---------------------------------------------------------------------------
+# Claim rules applied to every Web API — maps AD attributes to OIDC claims
+# ---------------------------------------------------------------------------
+
+$IssuanceTransformRules = @'
+@RuleName = "UPN"
+c:[Type == "http://schemas.microsoft.com/ws/2008/06/identity/claims/windowsaccountname", Issuer == "AD AUTHORITY"]
+ => issue(store = "Active Directory", types = ("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn", "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"), query = ";userPrincipalName,tokenGroups;{0}", param = c.Value);
+
+@RuleName = "Groups-Roles"
+c:[Type == "http://schemas.microsoft.com/ws/2008/06/identity/claims/windowsaccountname", Issuer == "AD AUTHORITY"]
+ => issue(store = "Active Directory", types = ("http://schemas.microsoft.com/ws/2008/06/identity/claims/role"), query = ";tokenGroups;{0}", param = c.Value);
+'@
+
+# ---------------------------------------------------------------------------
+# Application definitions
+#
+# ServiceLabels: one or more cert SAN service labels whose hostnames feed
+#                redirect URIs for this group (DVR and Device share one group)
+# ClientId:      used as both the native client Identifier and the Web API
+#                Identifier — matches the "paste the client identifier" step
+#                in the ADFS wizard
+# AccessGroups:  AD security groups that are permitted access to the Web API
+#                (applied via "Permit specific group" access control policy)
+# ---------------------------------------------------------------------------
+
+$AppDefinitions = @(
+    [PSCustomObject]@{
+        GroupName     = 'Bastille Admin'
+        ClientId      = 'bastille-admin'
+        ServiceLabels = @('admin')
+        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
+        AccessGroups  = @('Bastille Admins')
+    },
+    [PSCustomObject]@{
+        GroupName     = 'Bastille DVR and Device'
+        ClientId      = 'bastille-dvr-device'
+        ServiceLabels = @('dvr', 'device')
+        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
+        AccessGroups  = @('Bastille Admins', 'Bastille Users')
+    },
+    [PSCustomObject]@{
+        GroupName     = 'Bastille ADAM'
+        ClientId      = 'bastille-adam'
+        ServiceLabels = @('explorer')
+        RedirectPaths = @('/auth-callback', '/authenticated', '/signin-callback', '/signout-callback')
+        AccessGroups  = @('Bastille Admins')
+    },
+    [PSCustomObject]@{
+        GroupName     = 'Bastille ADAM API'
+        ClientId      = 'bastille-adam-api'
+        ServiceLabels = @('wti')
+        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
+        AccessGroups  = @('Bastille Admins')
+    }
 )
 
 # ---------------------------------------------------------------------------
@@ -79,17 +148,10 @@ function Import-PfxToLocalMachineMy {
         [bool]$NonInteractive = $false
     )
 
-    if (-not (Test-Path -LiteralPath $FilePath)) {
-        Stop-Script "PFX file not found: $FilePath"
-    }
+    if (-not (Test-Path -LiteralPath $FilePath)) { Stop-Script "PFX file not found: $FilePath" }
 
     $beforeThumbprints = @(Get-ChildItem Cert:\LocalMachine\My | ForEach-Object { $_.Thumbprint })
-
-    $params = @{
-        FilePath          = $FilePath
-        CertStoreLocation = 'Cert:\LocalMachine\My'
-        ErrorAction       = 'Stop'
-    }
+    $params = @{ FilePath = $FilePath; CertStoreLocation = 'Cert:\LocalMachine\My'; ErrorAction = 'Stop' }
     if ($Exportable) { $params['Exportable'] = $true }
 
     $passwordIsEmpty = Get-SecureStringIsEmpty -Value $Password
@@ -100,10 +162,7 @@ function Import-PfxToLocalMachineMy {
     }
     catch {
         if (-not $passwordIsEmpty) { throw }
-
-        if ($NonInteractive) {
-            Stop-Script "PFX import failed and no password was provided. Use -PfxPassword to supply one."
-        }
+        if ($NonInteractive) { Stop-Script "PFX import failed and no password was provided. Use -PfxPassword to supply one." }
 
         Write-Host "PFX import failed without a password. The file may be password-protected." -ForegroundColor Yellow
         $prompted = Read-Host "Enter PFX password" -AsSecureString
@@ -152,7 +211,6 @@ function Get-NewHostSuffixFromSans {
     $splitNames = [System.Collections.Generic.List[string[]]]::new()
     foreach ($name in $DnsNames) { $splitNames.Add(@($name -split '\.')) }
 
-    # Try wildcard first
     foreach ($labels in $splitNames) {
         if ($labels[0] -eq '*') {
             $suffix = ($labels | Select-Object -Skip 1) -join '.'
@@ -160,7 +218,6 @@ function Get-NewHostSuffixFromSans {
         }
     }
 
-    # Fall back to longest common suffix
     $minLabels = ($splitNames | ForEach-Object { $_.Count } | Measure-Object -Minimum).Minimum
     if ($minLabels -lt 3) { return $null }
 
@@ -204,7 +261,6 @@ function Find-AdfsSanHostname {
         $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
         $segments   = @($firstLabel -split '-')
         if ($segments -contains 'adfs') {
-            # Prefer SANs that also contain 'auth' — more specific ADFS endpoint
             $score = if ($segments -contains 'auth') { 2 } else { 1 }
             if ($score -gt $bestScore) { $bestScore = $score; $best = $san }
         }
@@ -292,62 +348,34 @@ function Wait-AdfsService {
         Start-Sleep -Seconds 3
         $elapsed += 3
         $svc = Get-Service -Name adfssrv -ErrorAction SilentlyContinue
-        $svc.Refresh()
+        if ($null -ne $svc) { $svc.Refresh() }
     }
 
     return ($null -ne $svc -and $svc.Status -eq 'Running')
 }
 
-# ---------------------------------------------------------------------------
-# Application definitions — one entry per ADFS native client application
-# ---------------------------------------------------------------------------
-
-$AppDefinitions = @(
-    [PSCustomObject]@{
-        GroupName     = 'Admin Console'
-        ClientId      = 'admin-console'
-        ServiceLabel  = 'admin'
-        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
-    },
-    [PSCustomObject]@{
-        GroupName     = 'DVR Console'
-        ClientId      = 'dvr-console'
-        ServiceLabel  = 'dvr'
-        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
-    },
-    [PSCustomObject]@{
-        GroupName     = 'Device Dashboard'
-        ClientId      = 'device-dashboard'
-        ServiceLabel  = 'device'
-        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
-    },
-    [PSCustomObject]@{
-        GroupName     = 'ADAM Console'
-        ClientId      = 'adam-console'
-        ServiceLabel  = 'explorer'
-        RedirectPaths = @('/auth-callback', '/authenticated', '/signin-callback', '/signout-callback')
-    },
-    [PSCustomObject]@{
-        GroupName     = 'ADAM API'
-        ClientId      = 'adam-api'
-        ServiceLabel  = 'wti'
-        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
+function Resolve-AdGroupSid {
+    param([string]$GroupName)
+    try {
+        $ntAccount = New-Object System.Security.Principal.NTAccount($GroupName)
+        $sid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
+        return $sid.Value
     }
-)
+    catch {
+        return $null
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-if (-not (Test-IsAdmin)) {
-    Stop-Script "This script must be run as Administrator."
-}
+if (-not (Test-IsAdmin)) { Stop-Script "This script must be run as Administrator." }
 
-# Validate service account options
 $serviceAccountCount = 0
-if ($null -ne $ServiceAccountCredential)              { $serviceAccountCount++ }
+if ($null -ne $ServiceAccountCredential)                               { $serviceAccountCount++ }
 if (-not [string]::IsNullOrWhiteSpace($GroupServiceAccountIdentifier)) { $serviceAccountCount++ }
-if ($UseNetworkService)                               { $serviceAccountCount++ }
+if ($UseNetworkService)                                                { $serviceAccountCount++ }
 
 if ($serviceAccountCount -eq 0) {
     Stop-Script "Specify a service account: -ServiceAccountCredential, -GroupServiceAccountIdentifier, or -UseNetworkService."
@@ -366,32 +394,26 @@ if (-not $SkipWindowsFeature) {
 
     $feature = Get-WindowsFeature -Name ADFS-Federation -ErrorAction SilentlyContinue
     if ($null -eq $feature) {
-        Stop-Script "Get-WindowsFeature returned nothing. Ensure this is a Windows Server with the Server Manager module available."
+        Stop-Script "Get-WindowsFeature returned nothing. Ensure this is Windows Server with Server Manager available."
     }
 
     if ($feature.InstallState -eq 'Installed') {
-        Write-Host "ADFS-Federation feature is already installed." -ForegroundColor Green
+        Write-Host "ADFS-Federation feature already installed." -ForegroundColor Green
     }
     else {
         Write-Host "Installing ADFS-Federation feature..." -ForegroundColor Cyan
         try {
             $result = Install-WindowsFeature -Name ADFS-Federation -IncludeManagementTools -ErrorAction Stop
-            if ($result.Success) {
-                Write-Host "ADFS-Federation installed successfully." -ForegroundColor Green
-                if ($result.RestartNeeded -ne 'No') {
-                    Write-Host "WARNING: A restart may be required before proceeding." -ForegroundColor Yellow
-                    if (-not (Confirm-Action "Continue without restarting? (y/n)")) {
-                        Stop-Script "Cancelled. Restart the server and re-run the script."
-                    }
+            if (-not $result.Success) { Stop-Script "ADFS-Federation feature installation failed." }
+            Write-Host "ADFS-Federation installed successfully." -ForegroundColor Green
+            if ($result.RestartNeeded -ne 'No') {
+                Write-Host "WARNING: A restart may be required before proceeding." -ForegroundColor Yellow
+                if (-not (Confirm-Action "Continue without restarting? (y/n)")) {
+                    Stop-Script "Cancelled. Restart the server and re-run the script."
                 }
             }
-            else {
-                Stop-Script "ADFS-Federation feature installation failed."
-            }
         }
-        catch {
-            Stop-Script "Failed to install ADFS-Federation: $($_.Exception.Message)"
-        }
+        catch { Stop-Script "Failed to install ADFS-Federation: $($_.Exception.Message)" }
     }
 }
 else {
@@ -406,41 +428,33 @@ else {
 Write-Host ""
 Write-Host "Importing PFX into Cert:\LocalMachine\My ..." -ForegroundColor Cyan
 
-$exportable = -not $NoExportable
-
 try {
-    $importedCerts = Import-PfxToLocalMachineMy -FilePath $PfxPath -Password $PfxPassword -Exportable:$exportable -NonInteractive:$NonInteractive
+    $importedCerts = Import-PfxToLocalMachineMy -FilePath $PfxPath -Password $PfxPassword -Exportable:(-not $NoExportable) -NonInteractive:$NonInteractive
 }
-catch {
-    Stop-Script "PFX import failed: $($_.Exception.Message)"
-}
+catch { Stop-Script "PFX import failed: $($_.Exception.Message)" }
 
 $leafCert = Get-BestLeafCertificate -Certificates $importedCerts
+if ($null -eq $leafCert) { Stop-Script "No usable leaf certificate with a private key was found after PFX import." }
 
-if ($null -eq $leafCert) {
-    Stop-Script "No usable leaf certificate with a private key was found after PFX import."
-}
-
-$thumbprint  = $leafCert.Thumbprint
-$certSans    = @(Get-CertificateDnsNames -Cert $leafCert)
-$newSuffix   = Get-NewHostSuffixFromSans -DnsNames $certSans
+$thumbprint = $leafCert.Thumbprint
+$certSans   = @(Get-CertificateDnsNames -Cert $leafCert)
+$newSuffix  = Get-NewHostSuffixFromSans -DnsNames $certSans
 
 Write-Host "Certificate imported:" -ForegroundColor Green
-Write-Host ("  Subject       : {0}" -f $leafCert.Subject)
-Write-Host ("  Thumbprint    : {0}" -f $thumbprint)
-Write-Host ("  NotAfter      : {0}" -f $leafCert.NotAfter)
+Write-Host ("  Subject    : {0}" -f $leafCert.Subject)
+Write-Host ("  Thumbprint : {0}" -f $thumbprint)
+Write-Host ("  NotAfter   : {0}" -f $leafCert.NotAfter)
 if ($certSans.Count -gt 0) {
-    Write-Host ("  SANs          : {0}" -f ($certSans -join ', '))
+    Write-Host ("  SANs       : {0}" -f ($certSans -join ', '))
 }
 
 # ---------------------------------------------------------------------------
-# Step 3: Grant private key access to ADFS service account
+# Step 3: Grant private key access
 # ---------------------------------------------------------------------------
 
 Write-Host ""
 Write-Host "Granting private key access to ADFS service account..." -ForegroundColor Cyan
 Grant-CertPrivateKeyReadAccess -Cert $leafCert -Account "NT SERVICE\adfssrv"
-
 if ($null -ne $ServiceAccountCredential) {
     Grant-CertPrivateKeyReadAccess -Cert $leafCert -Account $ServiceAccountCredential.UserName
 }
@@ -452,13 +466,10 @@ if ($null -ne $ServiceAccountCredential) {
 if ([string]::IsNullOrWhiteSpace($FederationServiceName)) {
     Write-Host ""
     Write-Host "Auto-detecting federation service name from certificate SANs..." -ForegroundColor Cyan
-
     $FederationServiceName = Find-AdfsSanHostname -SanNames $certSans
-
     if ([string]::IsNullOrWhiteSpace($FederationServiceName)) {
         Stop-Script "Could not determine the federation service name from the certificate SANs. Provide -FederationServiceName explicitly."
     }
-
     Write-Host "Auto-detected federation service name: $FederationServiceName" -ForegroundColor Green
 }
 else {
@@ -474,7 +485,6 @@ if (Test-AdfsServiceExists) {
     Write-Host ""
     Write-Host "WARNING: The ADFS service (adfssrv) already exists on this machine." -ForegroundColor Yellow
     Write-Host "Running Install-AdfsFarm on an already-configured node will overwrite the existing configuration." -ForegroundColor Yellow
-
     if (-not (Confirm-Action "Proceed and overwrite existing ADFS configuration? (y/n)")) {
         Stop-Script "Cancelled by user."
     }
@@ -499,9 +509,7 @@ $farmParams = @{
 
 if ($null -ne $ServiceAccountCredential) {
     $farmParams['ServiceAccountCredential'] = $ServiceAccountCredential
-    if ($OverrideServiceAccount) {
-        $farmParams['OverrideServiceAccount'] = $true
-    }
+    if ($OverrideServiceAccount) { $farmParams['OverrideServiceAccount'] = $true }
     Write-Host "  Service Account            : $($ServiceAccountCredential.UserName)"
 }
 elseif (-not [string]::IsNullOrWhiteSpace($GroupServiceAccountIdentifier)) {
@@ -523,9 +531,7 @@ try {
     Install-AdfsFarm @farmParams | Out-Null
     Write-Host "ADFS farm installation completed." -ForegroundColor Green
 }
-catch {
-    Stop-Script "Install-AdfsFarm failed: $($_.Exception.Message)"
-}
+catch { Stop-Script "Install-AdfsFarm failed: $($_.Exception.Message)" }
 
 # ---------------------------------------------------------------------------
 # Step 7: Wait for ADFS service
@@ -538,8 +544,7 @@ if (Wait-AdfsService -TimeoutSeconds 120) {
     Write-Host "ADFS service is running." -ForegroundColor Green
 }
 else {
-    Write-Host "WARNING: ADFS service did not reach Running state within 120 seconds." -ForegroundColor Yellow
-    Write-Host "Attempting to continue — some steps may fail if the service is not ready." -ForegroundColor Yellow
+    Write-Host "WARNING: ADFS service did not reach Running state within 120 seconds. Some steps may fail." -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------------------
@@ -558,38 +563,29 @@ catch {
     Write-Host "Falling back to direct netsh binding." -ForegroundColor Yellow
 }
 
-# Ensure HTTP.SYS bindings are correct regardless of cmdlet result
-Write-Host "Verifying HTTP.SYS SSL bindings via netsh..." -ForegroundColor Cyan
+Write-Host "Verifying HTTP.SYS SSL bindings..." -ForegroundColor Cyan
 
 try {
     $httpSysBindings = @(Get-HttpSysSslBindings)
-    $stale = @($httpSysBindings | Where-Object { $_.CertHash -and $_.CertHash -ine $thumbprint })
-    $missing443 = -not ($httpSysBindings | Where-Object { $_.Binding -match ':443$' -and $_.CertHash -ieq $thumbprint })
+    $stale           = @($httpSysBindings | Where-Object { $_.CertHash -and $_.CertHash -ine $thumbprint })
+    $missing443      = -not ($httpSysBindings | Where-Object { $_.Binding -match ':443$' -and $_.CertHash -ieq $thumbprint })
 
-    if ($stale.Count -eq 0 -and -not $missing443) {
+    foreach ($b in $stale) {
+        $typeArg = "$($b.Type)=$($b.Binding)"
+        & netsh http delete sslcert $typeArg 2>&1 | Out-Null
+        $r = @(& netsh http add sslcert $typeArg certhash=$thumbprint appid=$($b.AppId) certstorename=$($b.Store) 2>&1)
+        $color = if ($LASTEXITCODE -eq 0) { "Green" } else { "Red" }
+        Write-Host ("  {0} {1}" -f $(if ($LASTEXITCODE -eq 0) { "Updated" } else { "FAILED" }), $b.Binding) -ForegroundColor $color
+    }
+
+    if ($missing443) {
+        Set-HttpSysSslBinding -IpPort "0.0.0.0:443" -Thumbprint $thumbprint -AppId '{5d89a20c-beab-4389-8f50-3dba3ec5af60}'
+    }
+    elseif ($stale.Count -eq 0) {
         Write-Host "HTTP.SYS bindings are correct." -ForegroundColor Green
     }
-    else {
-        # Update stale bindings
-        foreach ($b in $stale) {
-            $typeArg = "$($b.Type)=$($b.Binding)"
-            & netsh http delete sslcert $typeArg 2>&1 | Out-Null
-            $r = @(& netsh http add sslcert $typeArg certhash=$thumbprint appid=$($b.AppId) certstorename=$($b.Store) 2>&1)
-            $status = if ($LASTEXITCODE -eq 0) { "Updated" } else { "FAILED" }
-            $color  = if ($LASTEXITCODE -eq 0) { "Green"   } else { "Red"    }
-            Write-Host ("  [{0}] {1}" -f $status, $b.Binding) -ForegroundColor $color
-        }
-
-        # Ensure 0.0.0.0:443 is bound if nothing bound it yet
-        if ($missing443) {
-            $adfsAppId = '{5d89a20c-beab-4389-8f50-3dba3ec5af60}'
-            Set-HttpSysSslBinding -IpPort "0.0.0.0:443" -Thumbprint $thumbprint -AppId $adfsAppId
-        }
-    }
 }
-catch {
-    Write-Host "netsh verification failed: $($_.Exception.Message)" -ForegroundColor Red
-}
+catch { Write-Host "netsh verification failed: $($_.Exception.Message)" -ForegroundColor Red }
 
 # ---------------------------------------------------------------------------
 # Step 9: Service Communications certificate
@@ -602,9 +598,7 @@ try {
     Set-AdfsCertificate -CertificateType Service-Communications -Thumbprint $thumbprint -ErrorAction Stop
     Write-Host "Service Communications certificate set." -ForegroundColor Green
 }
-catch {
-    Write-Host "Service Communications update failed: $($_.Exception.Message)" -ForegroundColor Red
-}
+catch { Write-Host "Service Communications update failed: $($_.Exception.Message)" -ForegroundColor Red }
 
 # ---------------------------------------------------------------------------
 # Step 10: CORS trusted origins
@@ -614,7 +608,7 @@ if (-not $SkipCors) {
     Write-Host ""
     Write-Host "Configuring CORS trusted origins from certificate SANs..." -ForegroundColor Cyan
 
-    $corsLabels = @('admin', 'dvr', 'device', 'explorer', 'wti')
+    $corsLabels  = @('admin', 'dvr', 'device', 'explorer', 'wti')
     $corsOrigins = [System.Collections.Generic.List[string]]::new()
 
     foreach ($label in $corsLabels) {
@@ -628,16 +622,12 @@ if (-not $SkipCors) {
     }
 
     if ($corsOrigins.Count -gt 0) {
-        Write-Host "CORS origins to set:" -ForegroundColor Gray
         $corsOrigins | ForEach-Object { Write-Host "  $_" }
-
         try {
             Set-AdfsResponseHeaders -CORSTrustedOrigins $corsOrigins.ToArray() -ErrorAction Stop
             Write-Host "CORS trusted origins configured." -ForegroundColor Green
         }
-        catch {
-            Write-Host "CORS configuration failed: $($_.Exception.Message)" -ForegroundColor Red
-        }
+        catch { Write-Host "CORS configuration failed: $($_.Exception.Message)" -ForegroundColor Red }
     }
     else {
         Write-Host "No CORS origins could be resolved from the certificate SANs." -ForegroundColor Yellow
@@ -649,32 +639,169 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# Step 11: Application group and native client app registration
+# Step 11: AD Security Groups (4.2.2)
+# ---------------------------------------------------------------------------
+
+if (-not $SkipAdGroups) {
+    Write-Host ""
+    Write-Host "Creating AD security groups..." -ForegroundColor Cyan
+
+    $adSecurityGroups = @('Bastille Admins', 'Bastille Users')
+
+    foreach ($groupName in $adSecurityGroups) {
+        $existing = $null
+        try { $existing = Get-ADGroup -Filter { Name -eq $groupName } -ErrorAction Stop } catch {}
+
+        if ($null -eq $existing) {
+            $adGroupParams = @{
+                Name          = $groupName
+                GroupScope    = 'Global'
+                GroupCategory = 'Security'
+                ErrorAction   = 'Stop'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($AdGroupsOu)) { $adGroupParams['Path'] = $AdGroupsOu }
+            try {
+                New-ADGroup @adGroupParams | Out-Null
+                Write-Host "  [+] Group created: $groupName" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "  [!] Failed to create group '$groupName': $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+        else {
+            Write-Host "  [=] Group already exists: $groupName" -ForegroundColor Yellow
+        }
+    }
+}
+else {
+    Write-Host ""
+    Write-Host "Skipping AD security group creation (-SkipAdGroups specified)." -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
+# Step 12: Test Users and Group Membership (4.2.3 / 4.2.4)
+# ---------------------------------------------------------------------------
+
+if ($CreateTestUsers) {
+    Write-Host ""
+    Write-Host "Creating test AD users..." -ForegroundColor Cyan
+
+    $testUsers = @(
+        [PSCustomObject]@{ Name = 'BN Test'; SamAccountName = 'bntest'; Group = 'Bastille Admins' },
+        [PSCustomObject]@{ Name = 'BN User'; SamAccountName = 'bnuser'; Group = 'Bastille Users'  }
+    )
+
+    foreach ($userDef in $testUsers) {
+        $existing = $null
+        try { $existing = Get-ADUser -Filter { SamAccountName -eq $userDef.SamAccountName } -ErrorAction Stop } catch {}
+
+        if ($null -eq $existing) {
+            $adUserParams = @{
+                Name                  = $userDef.Name
+                SamAccountName        = $userDef.SamAccountName
+                AccountPassword       = (ConvertTo-SecureString 'ChangeMe1!' -AsPlainText -Force)
+                Enabled               = $true
+                ChangePasswordAtLogon = $false
+                ErrorAction           = 'Stop'
+            }
+            if (-not [string]::IsNullOrWhiteSpace($AdUsersOu)) { $adUserParams['Path'] = $AdUsersOu }
+            try {
+                New-ADUser @adUserParams | Out-Null
+                Write-Host "  [+] User created: $($userDef.Name) ($($userDef.SamAccountName))" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "  [!] Failed to create user '$($userDef.Name)': $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+        else {
+            Write-Host "  [=] User already exists: $($userDef.SamAccountName)" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Assigning test users to groups..." -ForegroundColor Cyan
+
+    foreach ($userDef in $testUsers) {
+        try {
+            Add-ADGroupMember -Identity $userDef.Group -Members $userDef.SamAccountName -ErrorAction Stop
+            Write-Host "  [+] $($userDef.SamAccountName) -> $($userDef.Group)" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "  [!] Failed to add '$($userDef.SamAccountName)' to '$($userDef.Group)': $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Step 13: Application groups, native clients, Web APIs, permissions, claims
+#
+# Each group follows the ADFS wizard pattern:
+#   1. Application Group
+#   2. Native Client Application  (ClientId = the client identifier)
+#   3. Web API Application        (Identifier = same ClientId, per wizard step 8)
+#   4. Application Permission     (openid + profile scopes)
+#   5. Issuance Transform Rules   (UPN rule + Groups-Roles rule on the Web API)
+#   6. Access Control Policy      ("Permit specific group" per AccessGroups)
 # ---------------------------------------------------------------------------
 
 if (-not $SkipAppRegistration) {
     Write-Host ""
-    Write-Host "Registering application groups and native client applications..." -ForegroundColor Cyan
+    Write-Host "Registering Bastille application groups..." -ForegroundColor Cyan
 
     foreach ($def in $AppDefinitions) {
-        $san = Resolve-HostnameFromSans -ServiceLabel $def.ServiceLabel -SanNames $certSans
 
-        if ([string]::IsNullOrWhiteSpace($san)) {
-            Write-Host ""
-            Write-Host "  [$($def.GroupName)] No matching SAN for label '$($def.ServiceLabel)' — skipped." -ForegroundColor Yellow
-            continue
+        # Collect redirect URIs across all service labels for this group
+        $redirectUris   = [System.Collections.Generic.List[string]]::new()
+        $resolvedLabels = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($label in $def.ServiceLabels) {
+            $san = Resolve-HostnameFromSans -ServiceLabel $label -SanNames $certSans
+            if ([string]::IsNullOrWhiteSpace($san)) {
+                Write-Warning "  No matching SAN for label '$label' in '$($def.GroupName)' — skipped."
+                continue
+            }
+            [void]$resolvedLabels.Add($san)
+            foreach ($path in $def.RedirectPaths) {
+                [void]$redirectUris.Add("https://$san$path")
+            }
         }
 
-        $redirectUris = @($def.RedirectPaths | ForEach-Object { "https://$san$_" })
+        if ($redirectUris.Count -eq 0) {
+            Write-Host ""
+            Write-Host "  [$($def.GroupName)] No SANs resolved — skipping group." -ForegroundColor Yellow
+            continue
+        }
 
         Write-Host ""
         Write-Host "  $($def.GroupName)" -ForegroundColor Cyan
         Write-Host "    Client ID     : $($def.ClientId)"
-        Write-Host "    Hostname      : $san"
+        Write-Host "    Hostnames     : $($resolvedLabels -join ', ')"
         Write-Host "    Redirect URIs :"
         $redirectUris | ForEach-Object { Write-Host "      $_" }
 
-        # Create application group (idempotent)
+        # Resolve access control policy for this group
+        $accessPolicyName   = "Permit everyone"
+        $accessPolicyParams = $null
+
+        if (-not $SkipAccessControlPolicies -and $def.AccessGroups -and $def.AccessGroups.Count -gt 0) {
+            $groupSids = [System.Collections.Generic.List[string]]::new()
+            foreach ($groupName in $def.AccessGroups) {
+                $sid = Resolve-AdGroupSid -GroupName $groupName
+                if ($sid) {
+                    [void]$groupSids.Add($sid)
+                }
+                else {
+                    Write-Warning "    Could not resolve SID for '$groupName' — using group name as fallback."
+                    [void]$groupSids.Add($groupName)
+                }
+            }
+            if ($groupSids.Count -gt 0) {
+                $accessPolicyName   = "Permit specific group"
+                $accessPolicyParams = @{ GroupParameter = $groupSids.ToArray() }
+            }
+        }
+
+        # 1. Application Group
         $existingGroup = Get-AdfsApplicationGroup -ApplicationGroupIdentifier $def.ClientId -ErrorAction SilentlyContinue
         if ($null -eq $existingGroup) {
             try {
@@ -682,47 +809,122 @@ if (-not $SkipAppRegistration) {
                     -Name $def.GroupName `
                     -ApplicationGroupIdentifier $def.ClientId `
                     -ErrorAction Stop | Out-Null
-                Write-Host "    Application group created." -ForegroundColor Green
+                Write-Host "    [+] Application group created." -ForegroundColor Green
             }
             catch {
-                Write-Host "    Failed to create application group: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "    [!] Failed to create application group: $($_.Exception.Message)" -ForegroundColor Red
                 continue
             }
         }
         else {
-            Write-Host "    Application group already exists." -ForegroundColor Yellow
+            Write-Host "    [=] Application group already exists." -ForegroundColor Yellow
         }
 
-        # Create native client application (idempotent)
-        $existingApp = Get-AdfsNativeClientApplication -ApplicationGroupIdentifier $def.ClientId -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq $def.GroupName }
+        # 2. Native Client Application
+        $existingNative = Get-AdfsNativeClientApplication -ApplicationGroupIdentifier $def.ClientId -ErrorAction SilentlyContinue |
+            Where-Object { $_.Identifier -eq $def.ClientId }
 
-        if ($null -eq $existingApp) {
+        if ($null -eq $existingNative) {
             try {
                 Add-AdfsNativeClientApplication `
                     -ApplicationGroupIdentifier $def.ClientId `
-                    -Name $def.GroupName `
-                    -Identifier "$($def.ClientId)-client" `
-                    -RedirectUri $redirectUris `
+                    -Name "$($def.GroupName) - Native" `
+                    -Identifier $def.ClientId `
+                    -RedirectUri $redirectUris.ToArray() `
                     -ErrorAction Stop | Out-Null
-                Write-Host "    Native client application registered." -ForegroundColor Green
+                Write-Host "    [+] Native client application registered." -ForegroundColor Green
             }
             catch {
-                Write-Host "    Failed to register native client application: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "    [!] Failed to register native client application: $($_.Exception.Message)" -ForegroundColor Red
             }
         }
         else {
-            Write-Host "    Native client application already exists — updating redirect URIs." -ForegroundColor Yellow
             try {
                 Set-AdfsNativeClientApplication `
-                    -TargetApplication $existingApp `
-                    -RedirectUri $redirectUris `
+                    -TargetApplication $existingNative `
+                    -RedirectUri $redirectUris.ToArray() `
                     -ErrorAction Stop | Out-Null
-                Write-Host "    Redirect URIs updated." -ForegroundColor Green
+                Write-Host "    [=] Native client application updated." -ForegroundColor Yellow
             }
             catch {
-                Write-Host "    Failed to update redirect URIs: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "    [!] Failed to update native client application: $($_.Exception.Message)" -ForegroundColor Red
             }
+        }
+
+        # 3. Web API Application (identifier = same ClientId, matching the wizard's paste-client-id step)
+        $webApiName = "$($def.GroupName) - Web API"
+        $existingWebApi = Get-AdfsWebApiApplication -ApplicationGroupIdentifier $def.ClientId -ErrorAction SilentlyContinue |
+            Where-Object { $_.Identifier -contains $def.ClientId }
+
+        if ($null -eq $existingWebApi) {
+            try {
+                $addWebApiParams = @{
+                    ApplicationGroupIdentifier = $def.ClientId
+                    Name                       = $webApiName
+                    Identifier                 = $def.ClientId
+                    AccessControlPolicyName    = $accessPolicyName
+                    ErrorAction                = 'Stop'
+                }
+                if ($null -ne $accessPolicyParams) {
+                    $addWebApiParams['AccessControlPolicyParameters'] = $accessPolicyParams
+                }
+                Add-AdfsWebApiApplication @addWebApiParams | Out-Null
+                Write-Host "    [+] Web API application registered (policy: $accessPolicyName)." -ForegroundColor Green
+            }
+            catch {
+                Write-Host "    [!] Failed to register Web API application: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+        else {
+            # Update access control policy on the existing Web API
+            try {
+                $updateParams = @{
+                    TargetApplication       = $existingWebApi
+                    AccessControlPolicyName = $accessPolicyName
+                    ErrorAction             = 'Stop'
+                }
+                if ($null -ne $accessPolicyParams) {
+                    $updateParams['AccessControlPolicyParameters'] = $accessPolicyParams
+                }
+                Set-AdfsWebApiApplication @updateParams | Out-Null
+                Write-Host "    [=] Web API application access control policy updated ($accessPolicyName)." -ForegroundColor Yellow
+            }
+            catch {
+                Write-Host "    [!] Failed to update Web API access control policy: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+
+        # 4. Application Permission (openid + profile)
+        $existingPermission = Get-AdfsApplicationPermission -ErrorAction SilentlyContinue |
+            Where-Object { $_.ClientRoleIdentifier -eq $def.ClientId -and $_.ServerRoleIdentifier -eq $def.ClientId }
+
+        if ($null -eq $existingPermission) {
+            try {
+                Grant-AdfsApplicationPermission `
+                    -ClientRoleIdentifier $def.ClientId `
+                    -ServerRoleIdentifier $def.ClientId `
+                    -ScopeNames @("openid", "profile") `
+                    -ErrorAction Stop | Out-Null
+                Write-Host "    [+] Application permission granted (openid, profile)." -ForegroundColor Green
+            }
+            catch {
+                Write-Host "    [!] Failed to grant application permission: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+        else {
+            Write-Host "    [=] Application permission already exists." -ForegroundColor Yellow
+        }
+
+        # 5. Issuance Transform Rules (UPN + Groups-Roles claim rules on the Web API)
+        try {
+            Set-AdfsWebApiApplication `
+                -TargetIdentifier $def.ClientId `
+                -IssuanceTransformRules $IssuanceTransformRules `
+                -ErrorAction Stop | Out-Null
+            Write-Host "    [+] Claim rules set (UPN, Groups-Roles)." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "    [!] Failed to set claim rules: $($_.Exception.Message)" -ForegroundColor Red
         }
     }
 }
@@ -732,7 +934,7 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# Step 12: Restart ADFS service
+# Step 14: Restart ADFS service
 # ---------------------------------------------------------------------------
 
 Write-Host ""
@@ -740,7 +942,6 @@ Write-Host "Restarting ADFS service to apply all changes..." -ForegroundColor Cy
 
 try {
     Restart-Service -Name adfssrv -Force -ErrorAction Stop
-
     if (Wait-AdfsService -TimeoutSeconds 60) {
         Write-Host "ADFS service restarted successfully." -ForegroundColor Green
     }
@@ -748,9 +949,7 @@ try {
         Write-Host "ADFS service restart timed out." -ForegroundColor Red
     }
 }
-catch {
-    Write-Host "ADFS service restart failed: $($_.Exception.Message)" -ForegroundColor Red
-}
+catch { Write-Host "ADFS service restart failed: $($_.Exception.Message)" -ForegroundColor Red }
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -762,4 +961,10 @@ Write-Host ("  Federation Service Name : {0}" -f $FederationServiceName) -Foregr
 Write-Host ("  Certificate Thumbprint  : {0}" -f $thumbprint)             -ForegroundColor DarkGray
 if (-not [string]::IsNullOrWhiteSpace($newSuffix)) {
     Write-Host ("  Domain Suffix           : {0}" -f $newSuffix)           -ForegroundColor DarkGray
+}
+Write-Host ""
+Write-Host "Application Groups:" -ForegroundColor DarkGray
+foreach ($def in $AppDefinitions) {
+    $accessNote = if ($def.AccessGroups -and $def.AccessGroups.Count -gt 0) { " [" + ($def.AccessGroups -join ", ") + "]" } else { "" }
+    Write-Host ("  {0}  [{1}]{2}" -f $def.GroupName, $def.ClientId, $accessNote) -ForegroundColor DarkGray
 }
