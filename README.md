@@ -11,117 +11,21 @@ Two scripts are provided depending on the deployment scenario:
 
 # Getting the Scripts onto the Server
 
-## Install Git on Windows Server
+## Download the Scripts
 
-Git is not included with Windows Server. Install it before cloning.
+1. Open the repository in a browser: `https://github.com/Bastille-Integration/adfs_migration_script`
+2. Click the green **Code** button and select **Download ZIP**.
+3. Extract the ZIP and copy the two `.ps1` files to the ADFS server (e.g. `C:\Temp\adfs-scripts\`).
 
-**Option 1 — winget (Windows Server 2019 / 2022 with App Installer):**
-
-```powershell
-winget install --id Git.Git -e --source winget
-```
-
-**Option 2 — Chocolatey (if already installed):**
+Alternatively, download the files directly from PowerShell on the server:
 
 ```powershell
-choco install git -y
-```
+$dest = "C:\Temp\adfs-scripts"
+New-Item -ItemType Directory -Path $dest -Force | Out-Null
 
-**Option 3 — Silent installer download (no package manager required):**
-
-```powershell
-$installer = "$env:TEMP\git-installer.exe"
-Invoke-WebRequest -Uri "https://github.com/git-for-windows/git/releases/latest/download/Git-2.49.0-64-bit.exe" `
-    -OutFile $installer
-Start-Process -FilePath $installer -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh" -Wait
-Remove-Item $installer
-```
-
-> Check [git-scm.com/download/win](https://git-scm.com/download/win) for the current version number and replace `2.49.0` in the URL if needed.
-
-After installation, reload the PATH in the current session so `git` is available without opening a new window:
-
-```powershell
-$env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-            [System.Environment]::GetEnvironmentVariable('Path', 'User')
-git --version
-```
-
----
-
-## Configure Git Identity
-
-Git requires a name and email before it will commit. This only needs to be done once per machine:
-
-```powershell
-git config --global user.name  "Your Name"
-git config --global user.email "you@example.com"
-```
-
----
-
-## Authenticate to GitHub
-
-### Option A — HTTPS with a Personal Access Token (PAT)
-
-1. In GitHub, go to **Settings → Developer settings → Personal access tokens → Tokens (classic)**.
-2. Generate a token with the `repo` scope (read access is sufficient for cloning).
-3. When `git clone` prompts for credentials, enter your GitHub username and the token as the password.
-
-To avoid being prompted on every operation, store the token in the Windows Credential Manager:
-
-```powershell
-git config --global credential.helper wincred
-```
-
-The first `git clone` or `git pull` will prompt once and cache the token permanently.
-
-### Option B — SSH Key
-
-Generate a key (if one does not already exist):
-
-```powershell
-ssh-keygen -t ed25519 -C "you@example.com"
-# Accept the default path: C:\Users\<user>\.ssh\id_ed25519
-```
-
-Copy the public key to the clipboard:
-
-```powershell
-Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" | Set-Clipboard
-```
-
-Add it to GitHub under **Settings → SSH and GPG keys → New SSH key**, then test:
-
-```powershell
-ssh -T git@github.com
-# Expected: Hi <username>! You've successfully authenticated...
-```
-
----
-
-## Clone the Repository
-
-```powershell
-# HTTPS
-git clone https://github.com/Bastille-Integration/adfs_migration_script.git
-
-# SSH
-git clone git@github.com:Bastille-Integration/adfs_migration_script.git
-```
-
-Navigate to the directory and verify the files are present:
-
-```powershell
-cd adfs_migration_script
-Get-ChildItem
-```
-
-You should see both scripts:
-
-```
-Install-ADFS-pfx-From_Scratch.ps1
-Install-ADFS-pfx-Redirects.ps1
+$base = "https://raw.githubusercontent.com/Bastille-Integration/adfs_migration_script/main"
+Invoke-WebRequest "$base/Install-ADFS-pfx-From_Scratch.ps1" -OutFile "$dest\Install-ADFS-pfx-From_Scratch.ps1"
+Invoke-WebRequest "$base/Install-ADFS-pfx-Redirects.ps1"   -OutFile "$dest\Install-ADFS-pfx-Redirects.ps1"
 ```
 
 ---
