@@ -53,10 +53,12 @@ Performs a complete first-time ADFS configuration for the Bastille Platform usin
 ## Requirements
 
 - Must be run **as Administrator** on the target ADFS node
-- Windows Server with Server Manager available (`Get-WindowsFeature`)
+- Windows Server 2016 or later with Server Manager available (`Get-WindowsFeature`)
 - Windows PowerShell with the `ADFS` module available (installed automatically with the feature)
 - The **Active Directory** PowerShell module (`RSAT-AD-PowerShell`) for AD group and user creation
 - A valid `.pfx` file containing the new certificate and its private key
+
+> **IIS note:** Microsoft IIS (`Web-Server`) is required for ADFS to host its endpoints. The script installs it automatically alongside `ADFS-Federation` in Step 1.
 
 ---
 
@@ -64,14 +66,14 @@ Performs a complete first-time ADFS configuration for the Bastille Platform usin
 
 The script performs the following steps in order:
 
-1. **Installs the ADFS-Federation Windows feature** (skippable with `-SkipWindowsFeature`).
+1. **Installs the ADFS-Federation and Web-Server (IIS) Windows features** (skippable with `-SkipWindowsFeature`).
 2. **Imports the PFX** into `Cert:\LocalMachine\My` and selects the best leaf certificate.
 3. **Grants the ADFS service account** (`NT SERVICE\adfssrv`) read access to the imported private key.
 4. **Resolves the Federation Service Name** from a SAN segment containing `adfs`, or from `-FederationServiceName`.
 5. **Installs the ADFS farm** via `Install-AdfsFarm`.
 6. **Binds the SSL certificate** and verifies HTTP.SYS bindings directly via `netsh`.
 7. **Sets the Service Communications certificate**.
-8. **Configures CORS trusted origins** from cert SANs.
+8. **Enables CORS and configures trusted origins** from cert SANs (`EnableCORS $true` + `CORSTrustedOrigins`).
 9. **Creates AD security groups** — `Bastille Admins` and `Bastille Users` (skippable with `-SkipAdGroups`).
 10. **Creates test AD users** and assigns them to groups (opt-in with `-CreateTestUsers`):
     - `BN Test` → `Bastille Admins`

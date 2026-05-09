@@ -390,22 +390,32 @@ if ($serviceAccountCount -gt 1) {
 
 if (-not $SkipWindowsFeature) {
     Write-Host ""
-    Write-Host "Checking ADFS Windows feature..." -ForegroundColor Cyan
+    Write-Host "Checking required Windows features..." -ForegroundColor Cyan
 
-    $feature = Get-WindowsFeature -Name ADFS-Federation -ErrorAction SilentlyContinue
-    if ($null -eq $feature) {
-        Stop-Script "Get-WindowsFeature returned nothing. Ensure this is Windows Server with Server Manager available."
+    # ADFS requires IIS (Web-Server) to host its endpoints
+    $requiredFeatures = @('ADFS-Federation', 'Web-Server')
+    $toInstall        = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($featureName in $requiredFeatures) {
+        $feature = Get-WindowsFeature -Name $featureName -ErrorAction SilentlyContinue
+        if ($null -eq $feature) {
+            Stop-Script "Get-WindowsFeature returned nothing for '$featureName'. Ensure this is Windows Server with Server Manager available."
+        }
+        if ($feature.InstallState -eq 'Installed') {
+            Write-Host "  $featureName — already installed." -ForegroundColor Green
+        }
+        else {
+            [void]$toInstall.Add($featureName)
+            Write-Host "  $featureName — will be installed." -ForegroundColor Yellow
+        }
     }
 
-    if ($feature.InstallState -eq 'Installed') {
-        Write-Host "ADFS-Federation feature already installed." -ForegroundColor Green
-    }
-    else {
-        Write-Host "Installing ADFS-Federation feature..." -ForegroundColor Cyan
+    if ($toInstall.Count -gt 0) {
+        Write-Host "Installing: $($toInstall -join ', ') ..." -ForegroundColor Cyan
         try {
-            $result = Install-WindowsFeature -Name ADFS-Federation -IncludeManagementTools -ErrorAction Stop
-            if (-not $result.Success) { Stop-Script "ADFS-Federation feature installation failed." }
-            Write-Host "ADFS-Federation installed successfully." -ForegroundColor Green
+            $result = Install-WindowsFeature -Name $toInstall.ToArray() -IncludeManagementTools -ErrorAction Stop
+            if (-not $result.Success) { Stop-Script "Windows feature installation failed." }
+            Write-Host "Features installed successfully." -ForegroundColor Green
             if ($result.RestartNeeded -ne 'No') {
                 Write-Host "WARNING: A restart may be required before proceeding." -ForegroundColor Yellow
                 if (-not (Confirm-Action "Continue without restarting? (y/n)")) {
@@ -413,7 +423,7 @@ if (-not $SkipWindowsFeature) {
                 }
             }
         }
-        catch { Stop-Script "Failed to install ADFS-Federation: $($_.Exception.Message)" }
+        catch { Stop-Script "Failed to install Windows features: $($_.Exception.Message)" }
     }
 }
 else {
@@ -624,8 +634,9 @@ if (-not $SkipCors) {
     if ($corsOrigins.Count -gt 0) {
         $corsOrigins | ForEach-Object { Write-Host "  $_" }
         try {
+            Set-AdfsResponseHeaders -EnableCORS $true -ErrorAction Stop
             Set-AdfsResponseHeaders -CORSTrustedOrigins $corsOrigins.ToArray() -ErrorAction Stop
-            Write-Host "CORS trusted origins configured." -ForegroundColor Green
+            Write-Host "CORS enabled and trusted origins configured." -ForegroundColor Green
         }
         catch { Write-Host "CORS configuration failed: $($_.Exception.Message)" -ForegroundColor Red }
     }
