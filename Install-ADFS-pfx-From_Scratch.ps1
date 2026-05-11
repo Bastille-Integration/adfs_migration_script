@@ -1,3 +1,4 @@
+# Version: 2.0
 # Requires: Run as Administrator on the target node
 # Deploys a fresh ADFS configuration using a PFX certificate.
 # Examples:

@@ -1,3 +1,4 @@
+# Version: 2.0
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
