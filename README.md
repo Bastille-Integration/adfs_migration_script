@@ -1,11 +1,10 @@
 # ADFS PFX Deployment Scripts
 
-Two scripts are provided depending on the deployment scenario:
-
 | Script | Purpose |
 |---|---|
 | `Install-ADFS-pfx-From_Scratch.ps1` | Fresh ADFS deployment — installs the Windows feature, configures the farm, creates AD groups and users, registers all Bastille application groups, and applies access control policies. |
 | `Install-ADFS-pfx-Redirects.ps1` | Certificate migration — replaces an existing ADFS self-signed certificate with a PFX and updates all hostname references. |
+| `Invoke-AdfsTroubleshoot.ps1` | Troubleshooting — checks ADFS service health, certificate expiry, recent event log errors, and AD/ADFS account lockout status. Can list all locked accounts or target a specific user and unlock them. |
 
 ---
 
@@ -472,4 +471,121 @@ Reads the existing ADFS CORS trusted origins and extracts the domain suffix from
 - **The redirect URI set is replaced, not merged.** Each native app's redirect URIs are set to exactly the migrated list. Any existing URI that does not match the old suffix is not carried over. Review current registrations before running.
 - **Run on every ADFS node.** Certificate binding (`Set-AdfsCertificate`, `Set-AdfsSslCertificate`) must be applied on each node in the farm; the ADFS configuration changes (redirect URIs, CORS, properties) only need to run once.
 - **ADFS service restart is always performed** at the end of the script. Plan for a brief service interruption.
+- The script requires PowerShell to be running as Administrator. It will exit immediately if the privilege check fails.
+
+---
+
+# Invoke-AdfsTroubleshoot.ps1
+
+Troubleshooting script for an ADFS node. Checks service health, certificate expiry, recent event log errors, and Active Directory / ADFS extranet account lockout status. Can list all currently locked AD accounts or target a specific user and unlock them in a single pass.
+
+## Requirements
+
+- Must be run **as Administrator** on an ADFS node
+- Windows PowerShell with the `ADFS` module available for ADFS health checks
+- The **Active Directory** PowerShell module (`RSAT-AD-PowerShell`) for account lockout operations
+
+Both modules are optional — sections that require a missing module are skipped with a warning.
+
+---
+
+## What It Does
+
+Runs the following checks in order:
+
+1. **ADFS Service** — reports whether `adfssrv` is running.
+2. **Certificate Expiry** — checks Token Signing, Token Decryption, Service Communications, and SSL certificates. Highlights anything expiring within `-CertWarnDays` days (default 30) or already expired.
+3. **ADFS Configuration** — shows the federation hostname, display name, audit level, and extranet lockout settings. If the audit level is `None`, prints the exact commands to enable auth-failure logging.
+4. **Recent Errors and Warnings** — pulls the last `-EventCount` errors and warnings from the `AD FS/Admin` event log and the `Security` log (ADFS Auditing source, if auditing is configured).
+5. **Account Lockout** — behavior depends on whether `-Username` is provided:
+   - **No `-Username`**: lists every locked AD account with lockout time and bad logon count.
+   - **With `-Username`**: shows full status for that account — AD locked/enabled state, bad password count, last bad password attempt, password expiry, last logon — plus ADFS extranet lockout activity if Smart Lockout is enabled.
+6. **Unlock** — if the account is locked and `-Unlock` is specified (or the user confirms interactively), the script:
+   - Unlocks the AD account via `Unlock-ADAccount`.
+   - Resets the ADFS extranet lockout via `Reset-AdfsAccountLockout` (falls back to `Set-AdfsAccountActivity` on older ADFS versions that lack that cmdlet).
+
+---
+
+## Usage
+
+```powershell
+.\Invoke-AdfsTroubleshoot.ps1
+```
+
+Runs the full ADFS health check and lists all locked AD accounts.
+
+### Check a specific user
+
+```powershell
+.\Invoke-AdfsTroubleshoot.ps1 -Username jsmith
+```
+
+Shows the user's AD account status and ADFS extranet lockout activity. If the account is locked, prompts to unlock.
+
+### Check and unlock a specific user
+
+```powershell
+.\Invoke-AdfsTroubleshoot.ps1 -Username jsmith -Unlock
+```
+
+### Non-interactive unlock (scripted / remote use)
+
+```powershell
+.\Invoke-AdfsTroubleshoot.ps1 -Username jsmith -Unlock -NonInteractive
+```
+
+### Skip the ADFS health checks (AD lockout only)
+
+```powershell
+.\Invoke-AdfsTroubleshoot.ps1 -SkipAdfs
+```
+
+---
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `-Username` | `string` | No | AD username (SamAccountName or UPN) to check. If omitted, all locked accounts are listed. |
+| `-Unlock` | `switch` | No | Unlock the specified user's AD account and reset their ADFS extranet lockout. |
+| `-EventCount` | `int` | No | Number of recent error/warning events to retrieve from the event log. Default: `30`. |
+| `-CertWarnDays` | `int` | No | Days-remaining threshold for certificate expiry warnings. Default: `30`. |
+| `-SkipAdfs` | `switch` | No | Skip all ADFS health checks (service, certs, config, events). Useful when only checking AD account status. |
+| `-SkipAd` | `switch` | No | Skip all AD account lockout checks. |
+| `-NonInteractive` | `switch` | No | Suppress all confirmation prompts. Unlock proceeds automatically when `-Unlock` is specified. |
+
+---
+
+## Account Lockout: AD vs. ADFS Extranet
+
+The script handles two separate lockout mechanisms:
+
+| Mechanism | What locks the account | How to check | How to reset |
+|---|---|---|---|
+| **AD Lockout** | Too many bad password attempts reach the Domain Controller | `Get-ADUser … -Properties LockedOut` | `Unlock-ADAccount` |
+| **ADFS Extranet Lockout** | Too many bad password attempts from unfamiliar IPs, tracked by ADFS before reaching AD | `Get-AdfsAccountActivity` | `Reset-AdfsAccountLockout` |
+
+A user can be blocked by either or both simultaneously. The `-Unlock` flag resets both in one step.
+
+> **Note:** ADFS deliberately shows a generic "incorrect username or password" message for both wrong passwords and locked accounts to prevent user enumeration. Account lockout can only be confirmed from the server side using this script or ADUC.
+
+---
+
+## Enabling ADFS Auth Failure Logging
+
+By default, ADFS may not log authentication failures to the Security event log. To enable:
+
+```powershell
+Set-AdfsProperties -AuditLevel Basic
+auditpol /set /subcategory:"Application Generated" /success:enable /failure:enable
+```
+
+After enabling, auth failures will appear in `Event Viewer > Windows Logs > Security` with source `AD FS Auditing`. The troubleshoot script will pick these up automatically.
+
+---
+
+## Important Notes
+
+- The script is read-only except when `-Unlock` is used (or the user confirms an unlock interactively).
+- ADFS extranet lockout reset requires ADFS 2016 or later with Smart Lockout enabled (`Set-AdfsProperties -EnableExtranetLockout $true`). The check is silently skipped on older versions or when lockout is disabled.
 - The script requires PowerShell to be running as Administrator. It will exit immediately if the privilege check fails.
