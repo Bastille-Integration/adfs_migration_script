@@ -68,7 +68,7 @@ function Show-AdfsServiceStatus {
         Write-Host ("  Service (adfssrv) : {0}" -f $svc.Status) -ForegroundColor $color
     }
     catch {
-        Write-Host "  Service (adfssrv) : Cannot query — $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ("  Service (adfssrv) : Cannot query - {0}" -f $_.Exception.Message) -ForegroundColor Red
     }
 }
 
@@ -76,17 +76,21 @@ function Show-CertRow {
     param([string]$Label, $Cert, [int]$WarnDays)
 
     if ($null -eq $Cert) {
-        Write-Host ("  {0,-38}: <not found>" -f $Label) -ForegroundColor Yellow
+        Write-Host ("  {0,-38}: (not found)" -f $Label) -ForegroundColor Yellow
         return
     }
 
-    $days  = [int](($Cert.NotAfter - (Get-Date)).TotalDays)
-    $color = if ($days -lt 0)        { 'Red'    }
-             elseif ($days -le $WarnDays) { 'Yellow' }
-             else                        { 'Green'  }
-    $note  = if ($days -lt 0)        { " [EXPIRED {0}d ago]"    -f (-$days) }
-             elseif ($days -le $WarnDays) { " [EXPIRES IN {0}d]"    -f $days  }
-             else                        { " ({0}d remaining)"       -f $days  }
+    $days = [int](($Cert.NotAfter - (Get-Date)).TotalDays)
+    if ($days -lt 0) {
+        $color = 'Red'
+        $note  = " [EXPIRED {0}d ago]" -f (-$days)
+    } elseif ($days -le $WarnDays) {
+        $color = 'Yellow'
+        $note  = " [EXPIRES IN {0}d]" -f $days
+    } else {
+        $color = 'Green'
+        $note  = " ({0}d remaining)" -f $days
+    }
 
     Write-Host ("  {0,-38}: {1}{2}" -f $Label, $Cert.NotAfter.ToString("yyyy-MM-dd"), $note) -ForegroundColor $color
 }
@@ -142,7 +146,7 @@ function Show-AdfsConfig {
 
         if ($p.AuditLevel -eq 'None') {
             Write-Host ""
-            Write-Host "  NOTE: Audit level is None — auth failures will not appear in the Security log." -ForegroundColor Yellow
+            Write-Host "  NOTE: Audit level is None - auth failures will not appear in the Security log." -ForegroundColor Yellow
             Write-Host "        To enable:" -ForegroundColor DarkYellow
             Write-Host "          Set-AdfsProperties -AuditLevel Basic" -ForegroundColor DarkYellow
             Write-Host "          auditpol /set /subcategory:`"Application Generated`" /success:enable /failure:enable" -ForegroundColor DarkYellow
@@ -160,7 +164,7 @@ function Show-AdfsRecentEvents {
 
     $collected = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # AD FS/Admin — errors and warnings
+    # AD FS/Admin - errors and warnings
     try {
         $adminEvents = Get-WinEvent -LogName 'AD FS/Admin' -MaxEvents ($Count * 3) -ErrorAction Stop |
             Where-Object { $_.Level -le 3 }
@@ -179,7 +183,7 @@ function Show-AdfsRecentEvents {
         Write-Host "  AD FS/Admin log not accessible: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    # Security log — ADFS Auditing source (requires auditing to be configured)
+    # Security log - ADFS Auditing source (requires auditing to be configured)
     try {
         $secEvents = Get-WinEvent -FilterHashtable @{
             LogName      = 'Security'
@@ -197,7 +201,7 @@ function Show-AdfsRecentEvents {
         }
     }
     catch {
-        # Silently skip — auditing may not be configured
+        # Silently skip - auditing may not be configured
     }
 
     if ($collected.Count -eq 0) {
@@ -262,7 +266,7 @@ function Show-AdUserStatus {
     }
 
     Write-Host ("  Password Expired  : {0}" -f $User.PasswordExpired) -ForegroundColor $pwdExpColor
-    Write-Host ("  Password Last Set : {0}" -f $(if ($User.PasswordLastSet) { $User.PasswordLastSet } else { "<never>" }))
+    Write-Host ("  Password Last Set : {0}" -f $(if ($User.PasswordLastSet) { $User.PasswordLastSet } else { "(never)" }))
 
     $pwdExpiry = if ($User.PasswordNeverExpires) {
         "Never"
@@ -272,7 +276,7 @@ function Show-AdUserStatus {
         "Unknown"
     }
     Write-Host ("  Password Expires  : {0}" -f $pwdExpiry)
-    Write-Host ("  Last Logon        : {0}" -f $(if ($User.LastLogonDate) { $User.LastLogonDate } else { "<never>" }))
+    Write-Host ("  Last Logon        : {0}" -f $(if ($User.LastLogonDate) { $User.LastLogonDate } else { "(never)" }))
 }
 
 function Show-AdfsExtranetStatus {
@@ -296,7 +300,7 @@ function Show-AdfsExtranetStatus {
             }
     }
     catch {
-        Write-Host ("  ADFS Extranet     : Not available — {0}" -f $_.Exception.Message) -ForegroundColor Gray
+        Write-Host ("  ADFS Extranet     : Not available - {0}" -f $_.Exception.Message) -ForegroundColor Gray
     }
 }
 
@@ -323,7 +327,7 @@ function Invoke-UnlockAccount {
                     }
                 }
                 else {
-                    Write-Host "  AD account is not locked — no AD unlock needed." -ForegroundColor Green
+                    Write-Host "  AD account is not locked - no AD unlock needed." -ForegroundColor Green
                 }
             }
         }
@@ -332,7 +336,7 @@ function Invoke-UnlockAccount {
         }
     }
     else {
-        Write-Host "  AD module not available — cannot unlock AD account from this session." -ForegroundColor Yellow
+        Write-Host "  AD module not available - cannot unlock AD account from this session." -ForegroundColor Yellow
         Write-Host "  Unlock manually via ADUC or a machine with RSAT-AD-PowerShell installed." -ForegroundColor Yellow
     }
 
@@ -341,7 +345,7 @@ function Invoke-UnlockAccount {
         try {
             $props = Get-AdfsProperties -ErrorAction Stop
             if (-not $props.EnableExtranetLockout) {
-                Write-Host "  ADFS Extranet Lockout is not enabled — no ADFS lockout to reset." -ForegroundColor Gray
+                Write-Host "  ADFS Extranet Lockout is not enabled - no ADFS lockout to reset." -ForegroundColor Gray
                 return
             }
 
@@ -372,7 +376,7 @@ function Invoke-UnlockAccount {
         }
     }
     elseif ($AdfsAvailable -and [string]::IsNullOrWhiteSpace($Upn)) {
-        Write-Host "  UPN not available — skipping ADFS extranet lockout reset." -ForegroundColor Yellow
+        Write-Host "  UPN not available - skipping ADFS extranet lockout reset." -ForegroundColor Yellow
         Write-Host "  Re-run with a UPN (e.g. -Username user@domain.com) to reset ADFS lockout." -ForegroundColor Yellow
     }
 }
@@ -423,7 +427,7 @@ if (-not $SkipAd) {
             }
         }
         else {
-            Write-Host "  AD module not available — cannot check AD account status." -ForegroundColor Yellow
+            Write-Host "  AD module not available - cannot check AD account status." -ForegroundColor Yellow
             # Username might already be a UPN
             if ($Username -match '@') { $upn = $Username }
         }
@@ -439,10 +443,12 @@ if (-not $SkipAd) {
             (Confirm-Action "`n  Account is locked. Unlock now? (y/n)")
         )
 
+        $samName = if ($null -ne $adUser) { $adUser.SamAccountName } else { $Username }
+
         if ($shouldUnlock) {
             Write-SectionHeader "Unlocking: $Username"
             Invoke-UnlockAccount `
-                -SamAccountName ($adUser ? $adUser.SamAccountName : $Username) `
+                -SamAccountName $samName `
                 -Upn            $upn `
                 -AdAvailable    $adAvailable `
                 -AdfsAvailable  $adfsAvailable
@@ -454,7 +460,7 @@ if (-not $SkipAd) {
 
             Write-SectionHeader "Unlocking: $Username"
             Invoke-UnlockAccount `
-                -SamAccountName ($adUser ? $adUser.SamAccountName : $Username) `
+                -SamAccountName $samName `
                 -Upn            $upn `
                 -AdAvailable    $adAvailable `
                 -AdfsAvailable  $adfsAvailable
@@ -499,7 +505,7 @@ if (-not $SkipAd) {
 
                     Write-Host ""
                     Write-Host "  To inspect or unlock a specific account:" -ForegroundColor Cyan
-                    Write-Host "    .\Invoke-AdfsTroubleshoot.ps1 -Username <samaccountname> -Unlock" -ForegroundColor DarkCyan
+                    Write-Host "    .\Invoke-AdfsTroubleshoot.ps1 -Username jsmith -Unlock" -ForegroundColor DarkCyan
                 }
             }
             catch {
