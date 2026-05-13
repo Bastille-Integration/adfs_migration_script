@@ -11,25 +11,6 @@ Two scripts are provided depending on the deployment scenario:
 
 # Getting the Scripts onto the Server
 
-## Download the Scripts
-
-1. Open the repository in a browser: `https://github.com/Bastille-Integration/adfs_migration_script`
-2. Click the green **Code** button and select **Download ZIP**.
-3. Extract the ZIP and copy the two `.ps1` files to the ADFS server (e.g. `C:\Temp\adfs-scripts\`).
-
-Alternatively, download the files directly from PowerShell on the server:
-
-```powershell
-$dest = "C:\Temp\adfs-scripts"
-New-Item -ItemType Directory -Path $dest -Force | Out-Null
-
-$base = "https://raw.githubusercontent.com/Bastille-Integration/adfs_migration_script/main"
-Invoke-WebRequest "$base/Install-ADFS-pfx-From_Scratch.ps1" -OutFile "$dest\Install-ADFS-pfx-From_Scratch.ps1"
-Invoke-WebRequest "$base/Install-ADFS-pfx-Redirects.ps1"   -OutFile "$dest\Install-ADFS-pfx-Redirects.ps1"
-```
-
----
-
 ## Allow PowerShell to Run the Scripts
 
 Windows Server defaults to a restricted execution policy. If running the scripts produces an error about execution policy, set it for the current session:
