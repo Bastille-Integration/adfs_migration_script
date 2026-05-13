@@ -204,6 +204,19 @@ function Test-CertificateNameMatch {
         $matchedBy += "SAN"
     }
 
+    # Wildcard SAN match: *.domain.tld covers expected.domain.tld
+    if ($matchedBy.Count -eq 0) {
+        foreach ($san in $sanNames) {
+            if (-not $san.StartsWith('*.')) { continue }
+            $wildcardDomain = $san.Substring(2)
+            $expectedParts = $expected -split '\.'
+            if ($expectedParts.Count -ge 2 -and ($expected -eq $expectedParts[0] + '.' + $wildcardDomain)) {
+                $matchedBy += "Wildcard SAN ($san)"
+                break
+            }
+        }
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($subjectCnNorm) -and $subjectCnNorm -eq $expected) {
         $matchedBy += "Subject CN"
     }
@@ -585,6 +598,18 @@ function Replace-HostUsingSans {
     }
 
     if ([string]::IsNullOrWhiteSpace($newHost)) {
+        # Wildcard fallback: *.domain.tld covers any single-label subdomain
+        foreach ($san in $SanNames) {
+            if (-not $san.StartsWith('*.')) { continue }
+            $wildcardDomain = $san.Substring(2)
+            if ($oldHost.EndsWith('.' + $wildcardDomain) -or $oldHost -eq $wildcardDomain) {
+                $newHost = $serviceLabel + '.' + $wildcardDomain
+                break
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($newHost)) {
         Write-Warning "No matching SAN found for host '$oldHost' (service label: '$serviceLabel'), skipping: $UriString"
         return $null
     }
@@ -624,6 +649,18 @@ function Resolve-HostnameFromSans {
             if ($score -gt $bestScore) {
                 $bestScore = $score
                 $bestMatch = $san
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($bestMatch)) {
+        # Wildcard fallback: *.domain.tld covers any single-label subdomain
+        foreach ($san in $SanNames) {
+            if (-not $san.StartsWith('*.')) { continue }
+            $wildcardDomain = $san.Substring(2)
+            if ($oldHost.EndsWith('.' + $wildcardDomain) -or $oldHost -eq $wildcardDomain) {
+                $bestMatch = $serviceLabel + '.' + $wildcardDomain
+                break
             }
         }
     }
