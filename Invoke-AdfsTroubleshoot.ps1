@@ -175,7 +175,7 @@ function Show-AdfsRecentEvents {
                 Source  = 'ADFS/Admin'
                 Level   = $e.LevelDisplayName
                 Id      = $e.Id
-                Message = (($e.Message -split "`n")[0]).Trim() -replace '\s+', ' '
+                Message = ((($e.Message -split "`n")[0]).Trim() -replace '\s+', ' ')
             })
         }
     }
@@ -196,7 +196,7 @@ function Show-AdfsRecentEvents {
                 Source  = 'Security'
                 Level   = $e.LevelDisplayName
                 Id      = $e.Id
-                Message = (($e.Message -split "`n")[0]).Trim() -replace '\s+', ' '
+                Message = ((($e.Message -split "`n")[0]).Trim() -replace '\s+', ' ')
             })
         }
     }
