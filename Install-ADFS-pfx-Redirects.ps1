@@ -598,14 +598,12 @@ function Replace-HostUsingSans {
     }
 
     if ([string]::IsNullOrWhiteSpace($newHost)) {
-        # Wildcard fallback: *.domain.tld covers any single-label subdomain
+        # Wildcard fallback: old-suffix filter above already confirmed this host should be
+        # migrated; pair the original service label with the wildcard's domain.
         foreach ($san in $SanNames) {
             if (-not $san.StartsWith('*.')) { continue }
-            $wildcardDomain = $san.Substring(2)
-            if ($oldHost.EndsWith('.' + $wildcardDomain) -or $oldHost -eq $wildcardDomain) {
-                $newHost = $serviceLabel + '.' + $wildcardDomain
-                break
-            }
+            $newHost = $serviceLabel + '.' + $san.Substring(2)
+            break
         }
     }
 
@@ -654,14 +652,12 @@ function Resolve-HostnameFromSans {
     }
 
     if ([string]::IsNullOrWhiteSpace($bestMatch)) {
-        # Wildcard fallback: *.domain.tld covers any single-label subdomain
+        # Wildcard fallback: old-suffix filter above already confirmed this host should be
+        # migrated; pair the original service label with the wildcard's domain.
         foreach ($san in $SanNames) {
             if (-not $san.StartsWith('*.')) { continue }
-            $wildcardDomain = $san.Substring(2)
-            if ($oldHost.EndsWith('.' + $wildcardDomain) -or $oldHost -eq $wildcardDomain) {
-                $bestMatch = $serviceLabel + '.' + $wildcardDomain
-                break
-            }
+            $bestMatch = $serviceLabel + '.' + $san.Substring(2)
+            break
         }
     }
 
