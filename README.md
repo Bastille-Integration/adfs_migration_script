@@ -71,7 +71,7 @@ The script performs the following steps in order:
 | Bastille Admin | `bastille-admin` | `admin` | Bastille Admins |
 | Bastille DVR and Device | `bastille-dvr-device` | `dvr`, `device` | Bastille Admins, Bastille Users |
 | Bastille ADAM | `bastille-adam` | `explorer` | Bastille Admins |
-| Bastille ADAM API | `bastille-adam-api` | `wti` | Bastille Admins |
+| Bastille ADAM API | `bastille-adam-api` | `wtiapi` | Bastille Admins |
 
 Redirect URIs are built at runtime by resolving each service label against the certificate SANs. See [SAN Label Matching](#san-label-matching) below.
 
@@ -101,9 +101,9 @@ The following callback URLs are registered per application group, with hostnames
 - `https://<explorer-host>/signout-callback`
 
 **ADAM API**
-- `https://<wti-host>/authenticated`
-- `https://<wti-host>/signin-callback`
-- `https://<wti-host>/signout-callback`
+- `https://<wtiapi-host>/authenticated`
+- `https://<wtiapi-host>/signin-callback`
+- `https://<wtiapi-host>/signout-callback`
 
 ### Claim Rules
 
@@ -231,7 +231,7 @@ Example — cert SANs include `wids-admin-site01.newdomain.com`:
 | `dvr` | `wids-dvr-site01.newdomain.com` |
 | `device` | `wids-device-site01.newdomain.com` |
 | `explorer` | `wids-explorer-site01.newdomain.com` |
-| `wti` | `wids-wti-site01.newdomain.com` |
+| `wtiapi` | `wids-wtiapi-site01.newdomain.com` |
 
 If no SAN matches a label, that application group's redirect URIs are skipped with a warning.
 
@@ -296,7 +296,7 @@ Example — cert SANs: `wids-admin-site01.newdomain.com`, `wids-dvr-site01.newdo
 | `dvr.olddomain.com` | `dvr` | `wids-dvr-site01.newdomain.com` |
 | `device.olddomain.com` | `device` | `wids-device-site01.newdomain.com` |
 | `explorer.olddomain.com` | `explorer` | `wids-explorer-site01.newdomain.com` |
-| `wti.olddomain.com` | `wti` | `wids-wti-site01.newdomain.com` |
+| `wtiapi.olddomain.com` | `wtiapi` | `wids-wtiapi-site01.newdomain.com` |
 | `adfs.olddomain.com` | `adfs` | `wids-auth-adfs-site01.newdomain.com` |
 
 URI paths and ports are preserved in both cases. If no SAN match is found for a hostname, that URI is skipped with a warning rather than silently dropped.

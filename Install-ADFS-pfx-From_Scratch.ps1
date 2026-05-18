@@ -100,7 +100,7 @@ $AppDefinitions = @(
     [PSCustomObject]@{
         GroupName     = 'Bastille ADAM API'
         ClientId      = 'bastille-adam-api'
-        ServiceLabels = @('wti')
+        ServiceLabels = @('wtiapi')
         RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
         AccessGroups  = @('Bastille Admins')
     }
@@ -619,7 +619,7 @@ if (-not $SkipCors) {
     Write-Host ""
     Write-Host "Configuring CORS trusted origins from certificate SANs..." -ForegroundColor Cyan
 
-    $corsLabels  = @('admin', 'dvr', 'device', 'explorer', 'wti')
+    $corsLabels  = @('admin', 'dvr', 'device', 'explorer', 'wtiapi')
     $corsOrigins = [System.Collections.Generic.List[string]]::new()
 
     foreach ($label in $corsLabels) {
