@@ -269,11 +269,12 @@ The script performs the following steps in order:
 4. **Determines the old and new host suffixes** — either from explicit parameters or by auto-detection:
    - **New suffix**: extracted from a wildcard SAN (e.g. `*.newdomain.com`) or inferred as the longest common suffix shared by all explicit SANs.
    - **Old suffix**: read from the existing ADFS CORS trusted origins.
-5. **Updates redirect URIs** on all ADFS native client applications.
-6. **Updates Federation Service Properties** (DisplayName, HostName, Identifier).
-7. **Updates CORS Trusted Origins**.
-8. **Binds the new certificate** as the ADFS Service Communications certificate and SSL certificate.
-9. **Restarts the ADFS service** and waits up to 60 seconds to confirm it comes back up.
+5. **Prompts for (or accepts) the target ADFS hostname** — the FQDN the Federation Service will use after migration. Validated against the certificate SANs. Supply via `-TargetAdfsHostname` to skip the prompt.
+6. **Updates redirect URIs** on all ADFS native client applications.
+7. **Updates Federation Service Properties** (DisplayName, HostName, Identifier).
+8. **Updates CORS Trusted Origins**.
+9. **Binds the new certificate** as the ADFS Service Communications certificate and SSL certificate.
+10. **Restarts the ADFS service** and waits up to 60 seconds to confirm it comes back up.
 
 ### Hostname Matching: Suffix Swap vs. SAN Label Matching
 
@@ -286,7 +287,9 @@ admin.olddomain.com  →  admin.newdomain.com
 ```
 
 **SAN label matching** (host-specific cert):
-When the certificate contains explicit hostnames rather than a wildcard, the script extracts the service label (first DNS segment) from each old hostname and finds the certificate SAN whose first label contains that service name as a hyphen-delimited segment.
+When the certificate contains explicit hostnames rather than a wildcard, the script collapses all subdomain labels above the old suffix into a single hyphen-joined service label, then finds the certificate SAN whose first label contains that service name as a hyphen-delimited segment.
+
+The label collapse handles multi-level old hostnames correctly. For example, `wids-auth.adfs-abl17.olddomain.com` with an old suffix of `olddomain.com` produces the service label `wids-auth-adfs-abl17`, which then matches the flat SAN `wids-auth-adfs-abl17.newdomain.com`.
 
 Example — cert SANs: `wids-admin-site01.newdomain.com`, `wids-dvr-site01.newdomain.com`, `wids-auth-adfs-site01.newdomain.com` ...
 
@@ -297,21 +300,33 @@ Example — cert SANs: `wids-admin-site01.newdomain.com`, `wids-dvr-site01.newdo
 | `device.olddomain.com` | `device` | `wids-device-site01.newdomain.com` |
 | `explorer.olddomain.com` | `explorer` | `wids-explorer-site01.newdomain.com` |
 | `wtiapi.olddomain.com` | `wtiapi` | `wids-wtiapi-site01.newdomain.com` |
-| `adfs.olddomain.com` | `adfs` | `wids-auth-adfs-site01.newdomain.com` |
+| `wids-auth.adfs-abl17.olddomain.com` | `wids-auth-adfs-abl17` | `wids-auth-adfs-abl17.newdomain.com` |
 
 URI paths and ports are preserved in both cases. If no SAN match is found for a hostname, that URI is skipped with a warning rather than silently dropped.
 
-### Federation Service Properties matching
+### Federation Service Properties and CORS: Explicit vs. Heuristic Mode
 
-The three Federation Service Properties are handled differently:
+How `HostName`, `Identifier`, and CORS origins are resolved depends on whether `-TargetAdfsHostname` is provided.
+
+**Explicit hostname mode** (`-TargetAdfsHostname` supplied or entered interactively):
+
+| Property | How it is set |
+|---|---|
+| `HostName` | Set directly to the provided FQDN |
+| `Identifier` | Existing URI host component replaced with the provided FQDN; scheme, path, and query preserved |
+| `DisplayName` | Plain suffix swap (human-readable text) |
+| CORS origin | `https://<TargetAdfsHostname>` added; existing origins on the old suffix removed; unrelated origins preserved |
+
+**Heuristic mode** (no `-TargetAdfsHostname`, cert has explicit SANs):
 
 | Property | Strategy |
 |---|---|
 | `HostName` | SAN label matching — must resolve to a hostname present in the cert |
 | `Identifier` | SAN label matching on the URI host component; path is preserved |
-| `DisplayName` | Plain suffix swap — human-readable text, not a hostname |
+| `DisplayName` | Plain suffix swap |
+| CORS origins | Each existing origin migrated via SAN label matching |
 
-For `HostName`, the service label is extracted and matched against SAN segments. Because ADFS hostnames commonly contain both `adfs` and `auth` as segments (e.g. `wids-auth-adfs-site01`), either label in the old hostname will resolve to the correct SAN.
+Explicit hostname mode is preferred when the ADFS service hostname is known — it is unambiguous and does not depend on heuristic matching.
 
 ---
 
@@ -321,7 +336,17 @@ For `HostName`, the service label is extracted and matched against SAN segments.
 .\Install-ADFS-pfx-Redirects.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
 ```
 
-The script will auto-detect the old and new host suffixes and prompt for confirmation at each step.
+The script will auto-detect the old and new host suffixes, prompt for the target ADFS hostname (validated against the certificate SANs), and confirm at each step.
+
+### With an explicit target ADFS hostname
+
+```powershell
+.\Install-ADFS-pfx-Redirects.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -TargetAdfsHostname "wids-auth-adfs-abl17.newdomain.com"
+```
+
+Skips the interactive FQDN prompt and sets the Federation Service HostName, Identifier, and CORS origin directly from the provided value.
 
 ### With a password-protected PFX
 
@@ -354,8 +379,11 @@ The script will auto-detect the old and new host suffixes and prompt for confirm
 .\Install-ADFS-pfx-Redirects.ps1 `
     -PfxPath "C:\Temp\adfs-cert.pfx" `
     -OldHostSuffix "olddomain.com" `
+    -TargetAdfsHostname "wids-auth-adfs-abl17.newdomain.com" `
     -NonInteractive
 ```
+
+`-TargetAdfsHostname` is required in non-interactive mode — the script will exit with an error if it is omitted.
 
 ### Skip individual steps
 
@@ -376,6 +404,7 @@ The script will auto-detect the old and new host suffixes and prompt for confirm
 | `-PfxPassword` | `SecureString` | No | Password for the PFX. Prompted if omitted and the file requires one. |
 | `-OldHostSuffix` | `string` | No | Domain suffix to replace (e.g. `olddomain.com`). Auto-detected from CORS trusted origins if omitted. |
 | `-NewHostSuffix` | `string` | No | Replacement domain suffix. Auto-detected from the certificate SANs if omitted. |
+| `-TargetAdfsHostname` | `string` | No | The exact FQDN the ADFS service will use after migration (e.g. `wids-auth-adfs-abl17.newdomain.com`). Prompted interactively if omitted. Required when `-NonInteractive` is set. |
 | `-ExpectedDnsName` | `string` | No | A specific DNS name that must appear in the certificate SAN or Subject CN. The script warns and prompts if it is absent. |
 | `-CorsExtraOrigins` | `string` | No | Comma-separated list of additional origins to add to CORS trusted origins (merged with migrated origins). |
 | `-NoExportable` | `switch` | No | Import the certificate as non-exportable. Exportable by default. |
