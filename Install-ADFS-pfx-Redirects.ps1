@@ -1,10 +1,11 @@
-# Version: 2.0
+# Version: 2.2
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -PfxPassword (Read-Host "PFX Password" -AsSecureString)
 # Optional overrides:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -OldHostSuffix "bn.nga.mil" -NewHostSuffix "rta.fak"
+#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "wids-auth-adfs-abl17.ophysicalsecurity.com"
 
 [CmdletBinding()]
 param(
@@ -16,6 +17,12 @@ param(
     [string]$OldHostSuffix,
 
     [string]$NewHostSuffix,
+
+    # The desired FQDN for the ADFS service (e.g. "wids-auth-adfs-abl17.ophysicalsecurity.com").
+    # If not supplied the script will prompt interactively. This value is used directly for
+    # the Federation Service HostName, Identifier, and CORS origin rather than being derived
+    # from heuristics, so it must be an exact hostname that exists in the certificate SANs.
+    [string]$TargetAdfsHostname,
 
     [string]$ExpectedDnsName,
 
@@ -69,6 +76,83 @@ function Confirm-Action {
 
     $answer = Read-Host $Prompt
     return ($answer -match '^(y|yes)$')
+}
+
+function Get-TargetAdfsHostname {
+    param(
+        [string]$ProvidedValue,
+        [string[]]$SanNames,
+        [bool]$NonInteractive = $false
+    )
+
+    # If a value was already supplied via parameter, validate and return it
+    if (-not [string]::IsNullOrWhiteSpace($ProvidedValue)) {
+        $hostname = $ProvidedValue.Trim().ToLowerInvariant()
+        Write-Host ""
+        Write-Host "Using provided target ADFS hostname: $hostname" -ForegroundColor Cyan
+        return $hostname
+    }
+
+    if ($NonInteractive) {
+        Stop-Script "No -TargetAdfsHostname was provided and the script is running non-interactively. Please supply -TargetAdfsHostname."
+    }
+
+    Write-Host ""
+    Write-Host "Enter the desired ADFS service hostname (FQDN)." -ForegroundColor Cyan
+    Write-Host "This will be used for the Federation Service HostName, Identifier, and CORS origin." -ForegroundColor Cyan
+
+    if ($SanNames.Count -gt 0) {
+        Write-Host "Certificate SANs available:" -ForegroundColor Gray
+        $SanNames | Where-Object { -not $_.StartsWith('*.') } | ForEach-Object { Write-Host "  $_" }
+    }
+
+    $hostname = $null
+    while ([string]::IsNullOrWhiteSpace($hostname)) {
+        $raw = Read-Host "Target ADFS hostname (e.g. wids-auth-adfs-abl17.ophysicalsecurity.com)"
+        $raw = $raw.Trim().ToLowerInvariant()
+
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            Write-Host "Hostname cannot be empty. Please try again." -ForegroundColor Yellow
+            continue
+        }
+
+        # Basic FQDN sanity check: must contain at least one dot and no spaces
+        if ($raw -notmatch '^[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?$' -or $raw -notmatch '\.') {
+            Write-Host "That does not look like a valid FQDN. Please try again." -ForegroundColor Yellow
+            continue
+        }
+
+        $hostname = $raw
+    }
+
+    # Warn if the hostname is not in the cert SANs (not a hard failure - operator may know best)
+    if ($SanNames.Count -gt 0) {
+        $inSan = $false
+        foreach ($san in $SanNames) {
+            if ($san -eq $hostname) { $inSan = $true; break }
+            if ($san.StartsWith('*.')) {
+                $wildcardDomain = $san.Substring(2)
+                $parts = $hostname -split '\.'
+                if ($parts.Count -ge 2 -and $hostname -eq ($parts[0] + '.' + $wildcardDomain)) {
+                    $inSan = $true; break
+                }
+            }
+        }
+
+        if (-not $inSan) {
+            Write-Host ""
+            Write-Host "WARNING: '$hostname' was not found in the certificate SANs." -ForegroundColor Yellow
+            Write-Host "The TLS binding may fail if the certificate does not cover this name." -ForegroundColor Yellow
+            if (-not (Confirm-Action "Continue anyway? (y/n)")) {
+                Stop-Script "Cancelled by user."
+            }
+        }
+        else {
+            Write-Host "Hostname confirmed in certificate SANs." -ForegroundColor Green
+        }
+    }
+
+    return $hostname
 }
 
 function Get-SecureStringIsEmpty {
@@ -294,7 +378,7 @@ function Import-PfxToLocalMachineMy {
             throw
         }
 
-        # Passwordless attempt failed — PFX may be password-protected
+        # Passwordless attempt failed - PFX may be password-protected
         if ($NonInteractive) {
             Stop-Script "PFX import failed and no password was provided. Use -PfxPassword to supply one."
         }
@@ -334,7 +418,7 @@ function Grant-CertPrivateKeyReadAccess {
     try {
         $privateKey = $Cert.PrivateKey
         if ($null -eq $privateKey) {
-            Write-Warning "Certificate has no accessible private key — skipping ACL update for '$Account'."
+            Write-Warning "Certificate has no accessible private key - skipping ACL update for '$Account'."
             return
         }
 
@@ -342,7 +426,7 @@ function Grant-CertPrivateKeyReadAccess {
         $keyPath = Join-Path "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys" $keyContainerName
 
         if (-not (Test-Path -LiteralPath $keyPath)) {
-            Write-Warning "Private key file not found at '$keyPath' — skipping ACL update for '$Account'."
+            Write-Warning "Private key file not found at '$keyPath' - skipping ACL update for '$Account'."
             return
         }
 
@@ -577,8 +661,17 @@ function Replace-HostUsingSans {
         }
     }
 
-    # Service label is the first dot-delimited segment of the old hostname
-    $serviceLabel = ($oldHost -split '\.')[0]
+    # Collapse all subdomain labels above OldSuffix into a single hyphenated service label
+    # so that e.g. wids-auth.adfs-abl17.ophysicalsecurity.com produces "wids-auth-adfs-abl17"
+    # and correctly matches the flat SAN wids-auth-adfs-abl17.ophysicalsecurity.com.
+    $hostParts   = $oldHost -split '\.'
+    $domainDepth = if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
+                       ($OldSuffix.Trim().ToLowerInvariant() -split '\.').Count
+                   } else { 0 }
+    $subParts    = if ($domainDepth -gt 0 -and $hostParts.Count -gt $domainDepth) {
+                       $hostParts[0..($hostParts.Count - $domainDepth - 1)]
+                   } else { @($hostParts[0]) }
+    $serviceLabel = $subParts -join '-'
 
     $newHost = $null
     $bestScore = -1
@@ -635,7 +728,18 @@ function Resolve-HostnameFromSans {
         }
     }
 
-    $serviceLabel = ($oldHost -split '\.')[0]
+    # Collapse all subdomain labels above OldSuffix into a single hyphenated service label
+    # so that e.g. wids-auth.adfs-abl17.ophysicalsecurity.com produces "wids-auth-adfs-abl17"
+    # and correctly matches the flat SAN wids-auth-adfs-abl17.ophysicalsecurity.com.
+    $hostParts   = $oldHost -split '\.'
+    $domainDepth = if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
+                       ($OldSuffix.Trim().ToLowerInvariant() -split '\.').Count
+                   } else { 0 }
+    $subParts    = if ($domainDepth -gt 0 -and $hostParts.Count -gt $domainDepth) {
+                       $hostParts[0..($hostParts.Count - $domainDepth - 1)]
+                   } else { @($hostParts[0]) }
+    $serviceLabel = $subParts -join '-'
+
     $bestMatch = $null
     $bestScore = -1
 
@@ -836,7 +940,10 @@ function Update-FederationServiceProperties {
     param(
         [string]$OldSuffix,
         [string]$NewSuffix,
-        [string[]]$SanNames = @()
+        [string[]]$SanNames = @(),
+        # When supplied, HostName and Identifier are set directly to this FQDN / a URI
+        # built from it, rather than being derived from heuristics.
+        [string]$TargetAdfsHostname = ''
     )
 
     try {
@@ -865,11 +972,32 @@ function Update-FederationServiceProperties {
         }
     }
 
-    # DisplayName is human-readable text — suffix swap is sufficient
+    # DisplayName is human-readable text - suffix swap is sufficient regardless of mode
     $newDisplayName = Replace-SuffixInText -Text $currentDisplayName -OldSuffix $OldSuffix -NewSuffix $NewSuffix
 
-    # HostName and Identifier contain hostnames that must exist in the cert SANs
-    if ($SanNames.Count -gt 0) {
+    if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
+        # --- Explicit hostname mode ---
+        # Set HostName directly to what the operator specified.
+        $newHostName = $TargetAdfsHostname.Trim().ToLowerInvariant()
+
+        # Rebuild Identifier by replacing only the host portion of the existing URI,
+        # preserving its scheme, path, and query so the federation metadata URL stays valid.
+        $newIdentifier = $null
+        if (-not [string]::IsNullOrWhiteSpace($currentIdentifier)) {
+            $parsedId = $null
+            if ([System.Uri]::TryCreate($currentIdentifier, [System.UriKind]::Absolute, [ref]$parsedId)) {
+                $builder = New-Object System.UriBuilder($parsedId)
+                $builder.Host = $newHostName
+                $newIdentifier = $builder.Uri.AbsoluteUri
+            }
+            else {
+                # Not a valid URI - fall back to plain text suffix replacement
+                $newIdentifier = Replace-SuffixInText -Text $currentIdentifier -OldSuffix $OldSuffix -NewSuffix $NewSuffix
+            }
+        }
+    }
+    elseif ($SanNames.Count -gt 0) {
+        # --- SAN heuristic mode (no explicit hostname supplied) ---
         $newHostName = Resolve-HostnameFromSans -OldHostname $currentHostName -SanNames $SanNames -OldSuffix $OldSuffix
 
         $newIdentifier = $null
@@ -962,7 +1090,10 @@ function Update-CorsTrustedOrigins {
         [string]$OldSuffix,
         [string]$NewSuffix,
         [string]$ParamExtraOrigins,
-        [string[]]$SanNames = @()
+        [string[]]$SanNames = @(),
+        # When supplied the primary ADFS origin is built directly from this hostname
+        # rather than derived from existing origins via heuristics.
+        [string]$TargetAdfsHostname = ''
     )
 
     try {
@@ -981,21 +1112,56 @@ function Update-CorsTrustedOrigins {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $combined = New-Object 'System.Collections.Generic.List[string]'
 
-    foreach ($origin in $existing) {
-        if ([string]::IsNullOrWhiteSpace($origin)) { continue }
+    if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
+        # --- Explicit hostname mode ---
+        # Derive the ADFS HTTPS origin directly from the target hostname.
+        $targetOrigin = "https://" + $TargetAdfsHostname.Trim().ToLowerInvariant()
+        if ($set.Add($targetOrigin)) {
+            [void]$combined.Add($targetOrigin)
+        }
 
-        $migrated = $null
-        if ($SanNames.Count -gt 0) {
-            $migrated = Replace-HostUsingSans -UriString $origin -SanNames $SanNames -OldSuffix $OldSuffix
+        # Preserve any existing origins that do NOT belong to the old suffix
+        # (e.g. other trusted apps) so we don't wipe unrelated entries.
+        foreach ($origin in $existing) {
+            if ([string]::IsNullOrWhiteSpace($origin)) { continue }
+            $normalized = Convert-ToCorsOrigin -UriString $origin
+            if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+
+            # Skip origins that belong to the old suffix - they are replaced by $targetOrigin
+            if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
+                $parsedCheck = $null
+                if ([System.Uri]::TryCreate($origin, [System.UriKind]::Absolute, [ref]$parsedCheck)) {
+                    $hostCheck = $parsedCheck.Host.ToLowerInvariant()
+                    $oldSuffixNorm = $OldSuffix.Trim().ToLowerInvariant()
+                    if ($hostCheck -eq $oldSuffixNorm -or $hostCheck.EndsWith('.' + $oldSuffixNorm)) {
+                        continue
+                    }
+                }
+            }
+
+            if ($set.Add($normalized)) {
+                [void]$combined.Add($normalized)
+            }
         }
-        else {
-            $migrated = Replace-HostSuffix -UriString $origin -OldSuffix $OldSuffix -NewSuffix $NewSuffix
-        }
-        if (-not [string]::IsNullOrWhiteSpace($migrated)) {
-            $normalized = Convert-ToCorsOrigin -UriString $migrated
-            if (-not [string]::IsNullOrWhiteSpace($normalized)) {
-                if ($set.Add($normalized)) {
-                    [void]$combined.Add($normalized)
+    }
+    else {
+        # --- Heuristic mode (no explicit hostname supplied) ---
+        foreach ($origin in $existing) {
+            if ([string]::IsNullOrWhiteSpace($origin)) { continue }
+
+            $migrated = $null
+            if ($SanNames.Count -gt 0) {
+                $migrated = Replace-HostUsingSans -UriString $origin -SanNames $SanNames -OldSuffix $OldSuffix
+            }
+            else {
+                $migrated = Replace-HostSuffix -UriString $origin -OldSuffix $OldSuffix -NewSuffix $NewSuffix
+            }
+            if (-not [string]::IsNullOrWhiteSpace($migrated)) {
+                $normalized = Convert-ToCorsOrigin -UriString $migrated
+                if (-not [string]::IsNullOrWhiteSpace($normalized)) {
+                    if ($set.Add($normalized)) {
+                        [void]$combined.Add($normalized)
+                    }
                 }
             }
         }
@@ -1164,6 +1330,16 @@ Write-Host "Suffix mapping:" -ForegroundColor Cyan
 Write-Host "  Old: $OldHostSuffix"
 Write-Host "  New: $NewHostSuffix"
 
+# Prompt (or accept) the desired ADFS FQDN before asking the operator to confirm.
+# This is collected early so it appears in the confirmation summary.
+$TargetAdfsHostname = Get-TargetAdfsHostname `
+    -ProvidedValue $TargetAdfsHostname `
+    -SanNames $certSanNames `
+    -NonInteractive:$NonInteractive
+
+Write-Host ""
+Write-Host "Target ADFS hostname : $TargetAdfsHostname" -ForegroundColor Cyan
+
 if (-not $NonInteractive) {
     if (-not (Confirm-Action "Proceed with certificate binding and suffix replacement? (y/n)")) {
         Stop-Script "Cancelled by user."
@@ -1218,7 +1394,11 @@ else {
 }
 
 if (-not $SkipFederationServiceProperties) {
-    Update-FederationServiceProperties -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames
+    Update-FederationServiceProperties `
+        -OldSuffix $OldHostSuffix `
+        -NewSuffix $NewHostSuffix `
+        -SanNames $certSanNames `
+        -TargetAdfsHostname $TargetAdfsHostname
 }
 else {
     Write-Host ""
@@ -1226,7 +1406,12 @@ else {
 }
 
 if (-not $SkipCors) {
-    Update-CorsTrustedOrigins -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -ParamExtraOrigins $CorsExtraOrigins -SanNames $certSanNames
+    Update-CorsTrustedOrigins `
+        -OldSuffix $OldHostSuffix `
+        -NewSuffix $NewHostSuffix `
+        -ParamExtraOrigins $CorsExtraOrigins `
+        -SanNames $certSanNames `
+        -TargetAdfsHostname $TargetAdfsHostname
 }
 else {
     Write-Host ""
@@ -1395,6 +1580,7 @@ catch {
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Cyan
-Write-Host ("Selected thumbprint: {0}" -f $thumbprint) -ForegroundColor DarkGray
-Write-Host ("Old suffix        : {0}" -f $OldHostSuffix) -ForegroundColor DarkGray
-Write-Host ("New suffix        : {0}" -f $NewHostSuffix) -ForegroundColor DarkGray
+Write-Host ("Selected thumbprint  : {0}" -f $thumbprint) -ForegroundColor DarkGray
+Write-Host ("Old suffix           : {0}" -f $OldHostSuffix) -ForegroundColor DarkGray
+Write-Host ("New suffix           : {0}" -f $NewHostSuffix) -ForegroundColor DarkGray
+Write-Host ("Target ADFS hostname : {0}" -f $TargetAdfsHostname) -ForegroundColor DarkGray
