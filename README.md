@@ -272,7 +272,7 @@ The script performs the following steps in order:
 5. **Prompts for (or accepts) the target ADFS hostname** — the FQDN the Federation Service will use after migration. Validated against the certificate SANs. Supply via `-TargetAdfsHostname` to skip the prompt.
 6. **Updates redirect URIs** on all ADFS native client applications.
 7. **Updates Federation Service Properties** (DisplayName, HostName, Identifier).
-8. **Updates CORS Trusted Origins**.
+8. **Resolves and confirms CORS Trusted Origins** — automatically identifies the admin, DVR, device, and explorer hostnames from the certificate SANs, combines them with the ADFS hostname and any `-CorsExtraOrigins`, shows the full proposed list, and prompts the operator to confirm before applying.
 9. **Binds the new certificate** as the ADFS Service Communications certificate and SSL certificate.
 10. **Restarts the ADFS service** and waits up to 60 seconds to confirm it comes back up.
 
@@ -315,7 +315,7 @@ How `HostName`, `Identifier`, and CORS origins are resolved depends on whether `
 | `HostName` | Set directly to the provided FQDN |
 | `Identifier` | Existing URI host component replaced with the provided FQDN; scheme, path, and query preserved |
 | `DisplayName` | Plain suffix swap (human-readable text) |
-| CORS origin | `https://<TargetAdfsHostname>` added; existing origins on the old suffix removed; unrelated origins preserved |
+| CORS origins | Resolved from cert SANs: ADFS host + admin, DVR, device, explorer app hosts + any `-CorsExtraOrigins`; operator confirms before applying |
 
 **Heuristic mode** (no `-TargetAdfsHostname`, cert has explicit SANs):
 
@@ -324,7 +324,7 @@ How `HostName`, `Identifier`, and CORS origins are resolved depends on whether `
 | `HostName` | SAN label matching — must resolve to a hostname present in the cert |
 | `Identifier` | SAN label matching on the URI host component; path is preserved |
 | `DisplayName` | Plain suffix swap |
-| CORS origins | Each existing origin migrated via SAN label matching |
+| CORS origins | Each existing origin migrated via SAN label matching; operator confirms before applying |
 
 Explicit hostname mode is preferred when the ADFS service hostname is known — it is unambiguous and does not depend on heuristic matching.
 
