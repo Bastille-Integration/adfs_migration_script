@@ -1089,6 +1089,8 @@ function Resolve-AppCorsOrigins {
     param(
         [string[]]$SanNames,
         [string]$TargetAdfsHostname,
+        [string]$OldSuffix = '',
+        [string]$NewSuffix = '',
         [string]$ParamExtraOrigins = ''
     )
 
@@ -1100,6 +1102,7 @@ function Resolve-AppCorsOrigins {
         if ($set.Add($origin)) { [void]$result.Add($origin) }
     }
 
+    # Try cert SANs first (host-specific certs with explicit app SANs)
     foreach ($label in @('admin', 'dvr', 'device', 'explorer')) {
         foreach ($san in ($SanNames | Where-Object { -not $_.StartsWith('*.') })) {
             $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
@@ -1109,6 +1112,40 @@ function Resolve-AppCorsOrigins {
                 break
             }
         }
+    }
+
+    # Supplement from native app redirect URIs — covers wildcard-cert deployments
+    # where app hostnames do not appear individually in the cert SANs.
+    # Redirect URIs are already on the new suffix (updated earlier in the script),
+    # so migration is a no-op for already-current URIs and corrects any that were
+    # skipped during the redirect update step.
+    try {
+        foreach ($group in (Get-AdfsApplicationGroup -ErrorAction Stop | Sort-Object Name)) {
+            foreach ($app in @(Get-AdfsNativeClientApplication -ApplicationGroup $group -ErrorAction SilentlyContinue)) {
+                foreach ($uri in @($app.RedirectUri)) {
+                    $newUri = $null
+                    if ($SanNames.Count -gt 0) {
+                        $newUri = Replace-HostUsingSans -UriString $uri -SanNames $SanNames -OldSuffix $OldSuffix
+                    }
+                    if ([string]::IsNullOrWhiteSpace($newUri) -and
+                        -not [string]::IsNullOrWhiteSpace($OldSuffix) -and
+                        -not [string]::IsNullOrWhiteSpace($NewSuffix)) {
+                        $newUri = Replace-HostSuffix -UriString $uri -OldSuffix $OldSuffix -NewSuffix $NewSuffix
+                    }
+                    # If both migration paths returned null the URI is already on the
+                    # new suffix (or is unrelated); use it as-is.
+                    if ([string]::IsNullOrWhiteSpace($newUri)) { $newUri = $uri }
+
+                    $normalized = Convert-ToCorsOrigin -UriString $newUri
+                    if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
+                        [void]$result.Add($normalized)
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not read native app redirect URIs for CORS resolution: $($_.Exception.Message)"
     }
 
     foreach ($origin in (Parse-OriginList -Value $ParamExtraOrigins)) {
@@ -1461,6 +1498,8 @@ if (-not $SkipCors) {
     $proposedCorsOrigins = @(Resolve-AppCorsOrigins `
         -SanNames $certSanNames `
         -TargetAdfsHostname $TargetAdfsHostname `
+        -OldSuffix $OldHostSuffix `
+        -NewSuffix $NewHostSuffix `
         -ParamExtraOrigins $CorsExtraOrigins)
 
     Update-CorsTrustedOrigins `
