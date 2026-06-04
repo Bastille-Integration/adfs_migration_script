@@ -1085,6 +1085,42 @@ function Update-FederationServiceProperties {
     }
 }
 
+function Resolve-AppCorsOrigins {
+    param(
+        [string[]]$SanNames,
+        [string]$TargetAdfsHostname,
+        [string]$ParamExtraOrigins = ''
+    )
+
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $result = New-Object 'System.Collections.Generic.List[string]'
+
+    if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
+        $origin = "https://" + $TargetAdfsHostname.Trim().ToLowerInvariant()
+        if ($set.Add($origin)) { [void]$result.Add($origin) }
+    }
+
+    foreach ($label in @('admin', 'dvr', 'device', 'explorer')) {
+        foreach ($san in ($SanNames | Where-Object { -not $_.StartsWith('*.') })) {
+            $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
+            if (@($firstLabel -split '-') -contains $label) {
+                $origin = "https://$san"
+                if ($set.Add($origin)) { [void]$result.Add($origin) }
+                break
+            }
+        }
+    }
+
+    foreach ($origin in (Parse-OriginList -Value $ParamExtraOrigins)) {
+        $normalized = Convert-ToCorsOrigin -UriString $origin
+        if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
+            [void]$result.Add($normalized)
+        }
+    }
+
+    return ,$result.ToArray()
+}
+
 function Update-CorsTrustedOrigins {
     param(
         [string]$OldSuffix,
@@ -1093,7 +1129,10 @@ function Update-CorsTrustedOrigins {
         [string[]]$SanNames = @(),
         # When supplied the primary ADFS origin is built directly from this hostname
         # rather than derived from existing origins via heuristics.
-        [string]$TargetAdfsHostname = ''
+        [string]$TargetAdfsHostname = '',
+        # When supplied (built by Resolve-AppCorsOrigins) derivation is skipped
+        # and this list is used directly as the replacement set.
+        [string[]]$ProposedOrigins = @()
     )
 
     try {
@@ -1112,7 +1151,15 @@ function Update-CorsTrustedOrigins {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $combined = New-Object 'System.Collections.Generic.List[string]'
 
-    if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
+    if ($ProposedOrigins.Count -gt 0) {
+        # Pre-built list from Resolve-AppCorsOrigins — use directly
+        foreach ($origin in $ProposedOrigins) {
+            if (-not [string]::IsNullOrWhiteSpace($origin) -and $set.Add($origin)) {
+                [void]$combined.Add($origin)
+            }
+        }
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
         # --- Explicit hostname mode ---
         # Derive the ADFS HTTPS origin directly from the target hostname.
         $targetOrigin = "https://" + $TargetAdfsHostname.Trim().ToLowerInvariant()
@@ -1143,6 +1190,14 @@ function Update-CorsTrustedOrigins {
                 [void]$combined.Add($normalized)
             }
         }
+
+        foreach ($origin in (Parse-OriginList -Value $ParamExtraOrigins)) {
+            if ([string]::IsNullOrWhiteSpace($origin)) { continue }
+            $normalized = Convert-ToCorsOrigin -UriString $origin
+            if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
+                [void]$combined.Add($normalized)
+            }
+        }
     }
     else {
         # --- Heuristic mode (no explicit hostname supplied) ---
@@ -1165,14 +1220,11 @@ function Update-CorsTrustedOrigins {
                 }
             }
         }
-    }
 
-    foreach ($origin in (Parse-OriginList -Value $ParamExtraOrigins)) {
-        if ([string]::IsNullOrWhiteSpace($origin)) { continue }
-
-        $normalized = Convert-ToCorsOrigin -UriString $origin
-        if (-not [string]::IsNullOrWhiteSpace($normalized)) {
-            if ($set.Add($normalized)) {
+        foreach ($origin in (Parse-OriginList -Value $ParamExtraOrigins)) {
+            if ([string]::IsNullOrWhiteSpace($origin)) { continue }
+            $normalized = Convert-ToCorsOrigin -UriString $origin
+            if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
                 [void]$combined.Add($normalized)
             }
         }
@@ -1406,12 +1458,18 @@ else {
 }
 
 if (-not $SkipCors) {
+    $proposedCorsOrigins = @(Resolve-AppCorsOrigins `
+        -SanNames $certSanNames `
+        -TargetAdfsHostname $TargetAdfsHostname `
+        -ParamExtraOrigins $CorsExtraOrigins)
+
     Update-CorsTrustedOrigins `
         -OldSuffix $OldHostSuffix `
         -NewSuffix $NewHostSuffix `
         -ParamExtraOrigins $CorsExtraOrigins `
         -SanNames $certSanNames `
-        -TargetAdfsHostname $TargetAdfsHostname
+        -TargetAdfsHostname $TargetAdfsHostname `
+        -ProposedOrigins $proposedCorsOrigins
 }
 else {
     Write-Host ""
