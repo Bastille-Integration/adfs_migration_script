@@ -2,7 +2,7 @@
 # Requires: Run as Administrator on a domain controller (ActiveDirectory + ADFS modules)
 # Purpose: Create the Bastille OU/group/user structure and bind ADFS Web API
 #          applications to the appropriate access-control groups.
-# Notes:   Idempotent — re-running skips objects that already exist. ADFS access
+# Notes:   Idempotent - re-running skips objects that already exist. ADFS access
 #          control policies are applied using resolved group SIDs (the value the
 #          "Permit specific group" policy expects), not bare group names.
 # Examples:
@@ -94,7 +94,7 @@ function Ensure-Member {
     param([string]$GroupName, [string]$Member)
     $resolved = Resolve-User -Member $Member
     if (-not $resolved) {
-        Write-Warning "  Member '$Member' not found — cannot add to '$GroupName'. Skipped."
+        Write-Warning "  Member '$Member' not found - cannot add to '$GroupName'. Skipped."
         return
     }
     $current = Get-ADGroupMember -Identity $GroupName -ErrorAction SilentlyContinue |
@@ -198,7 +198,7 @@ if (-not $SkipAdfs) {
     Write-Host "Binding ADFS Web API access control policies..." -ForegroundColor Cyan
 
     if (-not (Get-Module -ListAvailable -Name ADFS)) {
-        Write-Warning "ADFS module not available — skipping Web API policy binding. Re-run on an ADFS node, or use -SkipAdfs to silence this."
+        Write-Warning "ADFS module not available - skipping Web API policy binding. Re-run on an ADFS node, or use -SkipAdfs to silence this."
     }
     else {
         Import-Module ADFS -ErrorAction Stop
@@ -212,7 +212,7 @@ if (-not $SkipAdfs) {
         foreach ($app in $appPolicies) {
             $target = Get-AdfsWebApiApplication -Name $app.TargetName -ErrorAction SilentlyContinue
             if (-not $target) {
-                Write-Warning "  Web API application not found: '$($app.TargetName)' — skipped. (Register it in ADFS first.)"
+                Write-Warning "  Web API application not found: '$($app.TargetName)' - skipped. (Register it in ADFS first.)"
                 continue
             }
 
@@ -222,7 +222,7 @@ if (-not $SkipAdfs) {
                 if ($sid) { $sids += $sid }
             }
             if ($sids.Count -eq 0) {
-                Write-Warning "  No group SIDs resolved for '$($app.TargetName)' — skipped."
+                Write-Warning "  No group SIDs resolved for '$($app.TargetName)' - skipped."
                 continue
             }
 
