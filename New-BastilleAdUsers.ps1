@@ -35,6 +35,11 @@
     Whether created accounts have non-expiring passwords. Default: $true (lab
     convenience). Pass -PasswordNeverExpires:$false to honor the domain policy.
 
+.PARAMETER ForcePasswordChange
+    Require the user to change their password at next logon. Applies to created
+    users and also flags an existing account. Forces PasswordNeverExpires off,
+    since AD does not allow both at once.
+
 .PARAMETER SkipUsers
     Seed the "create sample users?" choice to No (Restructure mode).
 
@@ -112,6 +117,11 @@ param(
 
     # Non-expiring passwords on created accounts (default on for lab use).
     [bool]$PasswordNeverExpires = $true,
+
+    # Require the user to change their password at next logon. Applies to created
+    # users and flags an existing account. Forces PasswordNeverExpires off (AD
+    # does not allow both).
+    [switch]$ForcePasswordChange,
 
     # Seed the "create sample users?" default to No.
     [switch]$SkipUsers,
@@ -199,6 +209,7 @@ COMMON OPTIONS
   -WhatIf / -Confirm     Preview changes / confirm each change (standard).
   -Mode <name>           Restructure | AddUser. Prompted at startup if omitted.
   -BaseOuName <name>     Base OU under the domain root (default: Bastille).
+  -ForcePasswordChange   Require created/flagged users to change password at next logon.
   -LogPath <path>        Transcript log path (default: timestamped, beside script).
 
 RESTRUCTURE OPTIONS
@@ -329,18 +340,38 @@ function Ensure-User {
         [string]$Upn,
         [securestring]$Password,
         [string]$Path,
-        [bool]$NeverExpires = $true
+        [bool]$NeverExpires = $true,
+        [bool]$MustChangePassword = $false
     )
+    # "Change password at next logon" and "password never expires" are mutually
+    # exclusive in AD; if both are requested, the change requirement wins.
+    $neverExpires = $NeverExpires
+    if ($MustChangePassword -and $NeverExpires) {
+        $neverExpires = $false
+        Write-Host "  [i] Password-change-at-logon requested; disabling PasswordNeverExpires for $SamAccountName." -ForegroundColor DarkGray
+    }
+
     $existing = Get-ADUser -Filter "SamAccountName -eq '$SamAccountName'" -ErrorAction SilentlyContinue
     if ($existing) {
         Write-Host "  [=] User exists: $Name ($SamAccountName)" -ForegroundColor DarkGray
+        if ($MustChangePassword) {
+            if ($PSCmdlet.ShouldProcess("$Name ($SamAccountName)", "Require password change at next logon")) {
+                try {
+                    Set-ADUser -Identity $existing -PasswordNeverExpires $false -ChangePasswordAtLogon $true `
+                        -Confirm:$false -ErrorAction Stop
+                    Write-Host "  [~] $SamAccountName flagged to change password at next logon" -ForegroundColor Green
+                }
+                catch { Add-Issue "Failed to flag '$SamAccountName' for password change: $($_.Exception.Message)" }
+            }
+        }
         return $existing
     }
     if ($PSCmdlet.ShouldProcess("$Name ($SamAccountName)", "Create user")) {
         try {
             $u = New-ADUser -Name $Name -GivenName $GivenName -Surname $Surname `
                 -SamAccountName $SamAccountName -UserPrincipalName $Upn `
-                -AccountPassword $Password -PasswordNeverExpires $NeverExpires -Enabled $true `
+                -AccountPassword $Password -PasswordNeverExpires $neverExpires `
+                -ChangePasswordAtLogon $MustChangePassword -Enabled $true `
                 -Path $Path -PassThru -Confirm:$false -ErrorAction Stop
             Write-Host "  [+] User created: $Name ($SamAccountName)" -ForegroundColor Green
             return $u
@@ -642,6 +673,11 @@ try {
         }
         $securePassword = ConvertTo-Secure -Value $pw
 
+        $forceChange = [bool]$ForcePasswordChange
+        if (-not $NonInteractive) {
+            $forceChange = Read-YesNo "  Require password change at next logon?" $forceChange
+        }
+
         # --- Plan + confirm ---
         Write-Host ""
         Write-Host "Plan:" -ForegroundColor Cyan
@@ -649,6 +685,9 @@ try {
         Write-Host "  UPN     : $upn"
         Write-Host "  OU      : $targetOuDn"
         Write-Host "  Groups  : $($groups -join ', ')"
+        $changeText = 'no'
+        if ($forceChange) { $changeText = 'yes (at next logon)' }
+        Write-Host "  Pwd chg : $changeText"
         if (-not $NonInteractive -and -not $WhatIfPreference) {
             if (-not (Read-YesNo "Proceed?" $true)) {
                 Write-Host "Aborted - no changes made." -ForegroundColor Yellow
@@ -661,7 +700,7 @@ try {
         Write-Host "Adding user..." -ForegroundColor Cyan
         Ensure-User -Name $name -GivenName $given -Surname $surname `
             -SamAccountName $sam -Upn $upn -Password $securePassword -Path $targetOuDn `
-            -NeverExpires $PasswordNeverExpires | Out-Null
+            -NeverExpires $PasswordNeverExpires -MustChangePassword $forceChange | Out-Null
         foreach ($g in $groups) { Ensure-Member -GroupName $g -Member $sam }
     }
     else {
@@ -679,6 +718,7 @@ try {
             CreateUsers = (-not $SkipUsers)
             ApplyAdfs   = ((-not $SkipAdfs) -and $adfsAvailable)
             Password    = $UserPassword
+            ForceChange = [bool]$ForcePasswordChange
         }
 
         if (-not $NonInteractive) {
@@ -692,6 +732,7 @@ try {
                 if (Read-YesNo "    Set a custom sample-user password (else use the default)?" $false) {
                     $cfg.Password = Read-Host "    Sample-user password" -AsSecureString
                 }
+                $cfg.ForceChange = Read-YesNo "    Require password change at next logon?" $cfg.ForceChange
             }
             if ($adfsAvailable) {
                 $cfg.ApplyAdfs = Read-YesNo "  Apply ADFS Web API access control policies?" $cfg.ApplyAdfs
@@ -708,7 +749,10 @@ try {
         $adminText = $cfg.AdminMember
         if ([string]::IsNullOrWhiteSpace($adminText)) { $adminText = '(skip)' }
         $usersText = 'no'
-        if ($cfg.CreateUsers) { $usersText = (($SampleUsers | ForEach-Object { $_.Sam }) -join ', ') }
+        if ($cfg.CreateUsers) {
+            $usersText = (($SampleUsers | ForEach-Object { $_.Sam }) -join ', ')
+            if ($cfg.ForceChange) { $usersText += '  (must change password at next logon)' }
+        }
         $adfsText = 'no'
         if ($cfg.ApplyAdfs) { $adfsText = 'yes' }
 
@@ -764,7 +808,8 @@ try {
                 if (-not $targetOu) { $targetOu = $ouUsers }
                 Ensure-User -Name $su.Name -GivenName $su.Given -Surname $su.Surname `
                     -SamAccountName $su.Sam -Upn "$($su.Sam)@$DomainForest" `
-                    -Password $securePassword -Path $targetOu -NeverExpires $PasswordNeverExpires | Out-Null
+                    -Password $securePassword -Path $targetOu -NeverExpires $PasswordNeverExpires `
+                    -MustChangePassword $cfg.ForceChange | Out-Null
             }
             Write-Host ""
             Write-Host "Assigning sample-user memberships..." -ForegroundColor Cyan

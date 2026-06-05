@@ -743,6 +743,15 @@ Prompts for the name, account details, and a role (Admin / Operator / Viewer), t
 
 `SamAccountName`, `UPN`, given/surname are derived from the name if not supplied; `-NewUserGroups` overrides the role's default groups.
 
+### Add a user who must change their password at next logon
+
+```powershell
+.\New-BastilleAdUsers.ps1 -Mode AddUser -NonInteractive `
+    -NewUserName "Jane Smith" -NewUserRole Operator -ForcePasswordChange
+```
+
+Also works on an **existing** account — running AddUser for a SAM that already exists with `-ForcePasswordChange` just flags it to change at next logon (and clears `PasswordNeverExpires`).
+
 ### Supply the sample-user password securely (instead of the default)
 
 ```powershell
@@ -771,6 +780,7 @@ Prompts for the name, account details, and a role (Admin / Operator / Viewer), t
 | `-BaseOuName` | `string` | No | Name of the base OU under the domain root. Default: `Bastille`. Used by all modes and by `-ReportOnly`. |
 | `-UserPassword` | `string` or `SecureString` | No | Password for created users. Accepts a `SecureString` (recommended) or a plain string. Seeds the password used when prompted; applied as-is under `-NonInteractive`. Defaults to the historical lab value if omitted. |
 | `-PasswordNeverExpires` | `bool` | No | Whether created accounts have non-expiring passwords. Default: `$true` (lab convenience). Use `-PasswordNeverExpires:$false` to honor the domain password policy. |
+| `-ForcePasswordChange` | `switch` | No | Require the user to change their password at next logon. Applies to created users and also flags an existing account. Forces `PasswordNeverExpires` off (AD does not allow both). Prompted interactively in both modes; the switch sets the default. |
 | `-SkipUsers` | `switch` | No | Seed the "create sample users?" prompt default to **No** (and skip them outright under `-NonInteractive`). |
 | `-SkipAdfs` | `switch` | No | Seed the "apply ADFS policies?" prompt default to **No** (and skip the step outright under `-NonInteractive`). |
 | `-NonInteractive` | `switch` | No | Accept all defaults with no prompts. Use for scripted/automated runs. |
