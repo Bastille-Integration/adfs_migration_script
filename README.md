@@ -639,9 +639,16 @@ This script implements a finer-grained, per-product RBAC model (admin / operator
 
 ## What It Does
 
-The script is **interactive by default**: it prints the current state, then walks you through what to create with the standard behavior shown as the `[default]` for each prompt. **Press Enter to accept a default, or type a new value to change it.** A plan summary is shown and confirmed before any change is made. Pass **`-NonInteractive`** to accept all defaults with no prompts (automation), or **`-ReportOnly`** to print the current state and exit.
+The script is **interactive by default** and starts by asking which of two operations to run:
 
-You can change, per run: the base OU name, the list of security groups, the admin account added to `BNAdmin` (or skip it), whether to create the sample users (and their password), and whether to apply the ADFS policies. The sample-user details and the ADFS app→group mappings live in editable arrays (`$SampleUsers`, `$AppPolicies`) at the top of the script.
+| Mode | What it does |
+|---|---|
+| **RBAC restructuring** (`-Mode Restructure`) | Creates/verifies the full OU tree, security groups, sample users, and ADFS Web API access-control policies. This is the original behavior. |
+| **Add a user** (`-Mode AddUser`) | Adds a single user to an **already-built** structure — prompts for the person's details and a role (Admin / Operator / Viewer), creates them in the matching OU, and adds them to that role's groups. No OUs/groups/policies are changed. |
+
+In both modes it prints the current state, walks you through the choices with the standard behavior shown as the `[default]` for each prompt (**Enter accepts, typed input overrides**), shows a plan, and confirms before making any change. Pass **`-NonInteractive`** to accept all defaults with no prompts (automation), or **`-ReportOnly`** to print the current state and exit.
+
+In **RBAC restructuring** you can change, per run: the base OU name, the list of security groups, the admin account added to `BNAdmin` (or skip it), whether to create the sample users (and their password), and whether to apply the ADFS policies. The sample-user details, the ADFS app→group mappings, and the role definitions live in editable arrays (`$SampleUsers`, `$AppPolicies`, `$Roles`) at the top of the script.
 
 The script is **idempotent** — every object is checked before creation and skipped if it already exists, so it is safe to re-run.
 
@@ -707,6 +714,23 @@ Run from an elevated prompt on a domain controller. With no parameters it runs t
 .\New-BastilleAdUsers.ps1 -NonInteractive
 ```
 
+### Add a single user to the existing structure (interactive)
+
+```powershell
+.\New-BastilleAdUsers.ps1 -Mode AddUser
+```
+
+Prompts for the name, account details, and a role (Admin / Operator / Viewer), then creates the user in the matching OU and adds them to that role's groups.
+
+### Add a user non-interactively (automation)
+
+```powershell
+.\New-BastilleAdUsers.ps1 -Mode AddUser -NonInteractive `
+    -NewUserName "Jane Smith" -NewUserRole Operator
+```
+
+`SamAccountName`, `UPN`, given/surname are derived from the name if not supplied; `-NewUserGroups` overrides the role's default groups.
+
 ### Supply the sample-user password securely (instead of the default)
 
 ```powershell
@@ -736,6 +760,14 @@ Run from an elevated prompt on a domain controller. With no parameters it runs t
 | `-SkipAdfs` | `switch` | No | Seed the "apply ADFS policies?" prompt default to **No** (and skip the step outright under `-NonInteractive`). |
 | `-NonInteractive` | `switch` | No | Accept all defaults with no prompts. Use for scripted/automated runs. |
 | `-ReportOnly` | `switch` | No | Print the current Bastille AD/ADFS state and exit without making any changes. |
+| `-Mode` | `string` | No | `Restructure` (full structure + ADFS policies) or `AddUser` (add one user to the existing structure). Prompted at startup if omitted; defaults to `Restructure` under `-NonInteractive`. |
+| `-NewUserName` | `string` | No | *(AddUser)* Full display name of the user to add, e.g. `"Jane Smith"`. Required for AddUser under `-NonInteractive`. |
+| `-NewUserGivenName` | `string` | No | *(AddUser)* First name. Derived from `-NewUserName` if omitted. |
+| `-NewUserSurname` | `string` | No | *(AddUser)* Last name. Derived from `-NewUserName` if omitted. |
+| `-NewUserSam` | `string` | No | *(AddUser)* SAM account name. Derived from the name (spaces → hyphens, lowercased) if omitted. |
+| `-NewUserUpn` | `string` | No | *(AddUser)* UPN. Defaults to `<sam>@<forest>` if omitted. |
+| `-NewUserRole` | `string` | No | *(AddUser)* `Admin`, `Operator`, or `Viewer` — sets the target OU and default groups. Required for AddUser under `-NonInteractive`. |
+| `-NewUserGroups` | `string[]` | No | *(AddUser)* Override the role's default group list. |
 
 ---
 

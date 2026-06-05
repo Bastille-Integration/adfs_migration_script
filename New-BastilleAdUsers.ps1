@@ -32,7 +32,24 @@ param(
     [switch]$NonInteractive,
 
     # Print the current Bastille AD/ADFS state and exit without making changes.
-    [switch]$ReportOnly
+    [switch]$ReportOnly,
+
+    # Operation mode. 'Restructure' creates/verifies the full OU/group/user
+    # structure and ADFS policies. 'AddUser' adds a single user to an existing
+    # structure. Prompted at startup if omitted (defaults to Restructure under
+    # -NonInteractive).
+    [ValidateSet('Restructure', 'AddUser')]
+    [string]$Mode,
+
+    # --- For -Mode AddUser (gathered interactively if omitted) ---
+    [string]$NewUserName,
+    [string]$NewUserGivenName,
+    [string]$NewUserSurname,
+    [string]$NewUserSam,
+    [string]$NewUserUpn,
+    [ValidateSet('Admin', 'Operator', 'Viewer')]
+    [string]$NewUserRole,
+    [string[]]$NewUserGroups
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +68,13 @@ $AppPolicies = @(
     [PSCustomObject]@{ TargetName = 'Bastille Admin - Web application';          Groups = @('BNAdmin') },
     [PSCustomObject]@{ TargetName = 'Bastille DVR and Device - Web application'; Groups = @('BNAdmin', 'DVROps', 'DVRViewer') },
     [PSCustomObject]@{ TargetName = 'Bastille Lighthouse - Web application';     Groups = @('BNAdmin', 'ADAMOps', 'ADAMViewer') }
+)
+
+# Role -> OU + default group memberships, used by the "add a user" mode.
+$Roles = @(
+    [PSCustomObject]@{ Name = 'Admin';    Ou = 'Admins';    Groups = @('BNAdmin') },
+    [PSCustomObject]@{ Name = 'Operator'; Ou = 'Operators'; Groups = @('DVROps', 'ADAMOps') },
+    [PSCustomObject]@{ Name = 'Viewer';   Ou = 'Viewers';   Groups = @('DVRViewer', 'ADAMViewer') }
 )
 
 # --- Input helpers ----------------------------------------------------------
@@ -296,6 +320,135 @@ if ($ReportOnly) {
 }
 
 # ---------------------------------------------------------------------------
+# Choose operation mode
+# ---------------------------------------------------------------------------
+
+$mode = $Mode
+if (-not $mode) {
+    if ($NonInteractive) {
+        $mode = 'Restructure'
+    }
+    else {
+        Write-Host ""
+        Write-Host "What would you like to do?" -ForegroundColor Cyan
+        Write-Host "  1) RBAC restructuring - create/verify the full OU/group/user structure and ADFS policies"
+        Write-Host "  2) Add a user         - add one user to the existing structure"
+        $choice = Read-WithDefault "  Choose" "1"
+        if ($choice -eq '2') { $mode = 'AddUser' } else { $mode = 'Restructure' }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Mode: Add a single user to an existing structure
+# ---------------------------------------------------------------------------
+
+if ($mode -eq 'AddUser') {
+    Write-Host ""
+    Write-Host "Add a user to the existing structure" -ForegroundColor Cyan
+
+    # Locate the existing tree.
+    $baseOuName = 'Bastille'
+    if ($NewUserName -or $NonInteractive) { } else { $baseOuName = Read-WithDefault "  Base OU name" $baseOuName }
+
+    # --- Identity ---
+    $name = $NewUserName
+    if (-not $name) {
+        if ($NonInteractive) { Write-Error "AddUser mode requires -NewUserName under -NonInteractive."; exit 1 }
+        $name = (Read-Host "  Full name (e.g. Jane Smith)").Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($name)) { Write-Host "No name given - aborting." -ForegroundColor Yellow; return }
+
+    $nameParts    = $name -split '\s+', 2
+    $givenDefault = $nameParts[0]
+    $surDefault   = ''
+    if ($nameParts.Count -gt 1) { $surDefault = $nameParts[1] }
+    $samDefault   = ($name -replace '\s+', '-').ToLower()
+
+    $given   = $NewUserGivenName
+    $surname = $NewUserSurname
+    $sam     = $NewUserSam
+    $upn     = $NewUserUpn
+    if ($NonInteractive) {
+        if (-not $given)   { $given = $givenDefault }
+        if (-not $surname) { $surname = $surDefault }
+        if (-not $sam)     { $sam = $samDefault }
+        if (-not $upn)     { $upn = "$sam@$DomainForest" }
+    }
+    else {
+        if (-not $given)   { $given = Read-WithDefault "  Given name" $givenDefault }
+        if (-not $surname) { $surname = Read-WithDefault "  Surname" $surDefault }
+        if (-not $sam)     { $sam = Read-WithDefault "  SAM account name" $samDefault }
+        if (-not $upn)     { $upn = Read-WithDefault "  UPN" "$sam@$DomainForest" }
+    }
+
+    # --- Role (OU + default groups) ---
+    $role = $null
+    if ($NewUserRole) { $role = $Roles | Where-Object { $_.Name -eq $NewUserRole } | Select-Object -First 1 }
+    if (-not $role) {
+        if ($NonInteractive) { Write-Error "AddUser mode requires a valid -NewUserRole under -NonInteractive."; exit 1 }
+        Write-Host "  Roles:"
+        for ($i = 0; $i -lt $Roles.Count; $i++) {
+            Write-Host ("    {0}) {1,-9} OU={2,-10} groups: {3}" -f ($i + 1), $Roles[$i].Name, $Roles[$i].Ou, ($Roles[$i].Groups -join ', '))
+        }
+        $roleChoice = Read-WithDefault "  Choose role" "3"
+        $idx = 2
+        if ($roleChoice -match '^\d+$' -and [int]$roleChoice -ge 1 -and [int]$roleChoice -le $Roles.Count) { $idx = [int]$roleChoice - 1 }
+        $role = $Roles[$idx]
+    }
+
+    # --- Groups (default from role, editable) ---
+    $groups = $NewUserGroups
+    if (-not $groups -or $groups.Count -eq 0) {
+        if ($NonInteractive) { $groups = $role.Groups }
+        else { $groups = Read-ListWithDefault "  Groups" $role.Groups }
+    }
+
+    # --- Target OU must already exist ---
+    $targetOuDn = "OU=$($role.Ou),OU=Users,OU=$baseOuName,$DomainDN"
+    $ouExists = $null
+    try { $ouExists = Get-ADOrganizationalUnit -Identity $targetOuDn -ErrorAction Stop } catch { $ouExists = $null }
+    if (-not $ouExists) {
+        Write-Error "Target OU '$targetOuDn' does not exist. Run RBAC restructuring first (Mode Restructure), or check the base OU name."
+        exit 1
+    }
+
+    # --- Password ---
+    $pw = $UserPassword
+    if (-not $NonInteractive) {
+        if (Read-YesNo "  Set a custom password (else use the default)?" $false) {
+            $pw = Read-Host "  Password" -AsSecureString
+        }
+    }
+    $securePassword = ConvertTo-Secure -Value $pw
+
+    # --- Plan + confirm ---
+    Write-Host ""
+    Write-Host "Plan:" -ForegroundColor Cyan
+    Write-Host "  User    : $name ($sam)"
+    Write-Host "  UPN     : $upn"
+    Write-Host "  OU      : $targetOuDn"
+    Write-Host "  Groups  : $($groups -join ', ')"
+    if (-not $NonInteractive) {
+        if (-not (Read-YesNo "Proceed?" $true)) {
+            Write-Host "Aborted - no changes made." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    # --- Execute ---
+    Write-Host ""
+    Write-Host "Adding user..." -ForegroundColor Cyan
+    Ensure-User -Name $name -GivenName $given -Surname $surname `
+        -SamAccountName $sam -Upn $upn -Password $securePassword -Path $targetOuDn | Out-Null
+    foreach ($g in $groups) { Ensure-Member -GroupName $g -Member $sam }
+
+    Show-BastilleState -Label "Final state (after changes)" -BastilleOu "OU=$baseOuName,$DomainDN"
+    Write-Host "Done." -ForegroundColor Cyan
+    return
+}
+
+# ---------------------------------------------------------------------------
+# Mode: RBAC restructuring
 # Gather configuration. Defaults reflect the standard behavior; -SkipUsers /
 # -SkipAdfs seed the relevant defaults to "no". Interactive unless requested.
 # ---------------------------------------------------------------------------
