@@ -18,6 +18,9 @@
 
 [CmdletBinding()]
 param(
+    # Show usage help and exit.
+    [switch]$Help,
+
     # Password for the sample users. Accepts a SecureString (recommended) or a
     # plain string. Seeds the default when prompted; used as-is in -NonInteractive.
     [object]$UserPassword = "bastille#123",
@@ -76,6 +79,62 @@ $Roles = @(
     [PSCustomObject]@{ Name = 'Operator'; Ou = 'Operators'; Groups = @('DVROps', 'ADAMOps') },
     [PSCustomObject]@{ Name = 'Viewer';   Ou = 'Viewers';   Groups = @('DVRViewer', 'ADAMViewer') }
 )
+
+# --- Help -------------------------------------------------------------------
+
+function Show-Help {
+    $help = @'
+New-BastilleAdUsers.ps1
+  Provision the Bastille AD RBAC structure (OUs, groups, users) and ADFS Web API
+  access control policies, or add a single user to an existing structure.
+
+USAGE
+  .\New-BastilleAdUsers.ps1 [-Mode <Restructure|AddUser>] [options]
+
+  Interactive by default: prints the current state, asks which operation to run,
+  prompts for each setting with the standard value shown as [default] (Enter to
+  accept, type to change), shows a plan, and confirms before any change.
+
+MODES
+  Restructure (default)  Create/verify the OU tree, security groups, sample
+                         users, and ADFS Web API access control policies.
+  AddUser                Add one user to an already-built structure: prompts for
+                         the person and a role (Admin/Operator/Viewer), creates
+                         them in the matching OU, and adds the role's groups.
+
+COMMON OPTIONS
+  -Help                  Show this help and exit.
+  -ReportOnly            Print the current Bastille AD/ADFS state and exit.
+  -NonInteractive        Accept all defaults with no prompts (automation).
+  -Mode <name>           Restructure | AddUser. Prompted at startup if omitted.
+
+RESTRUCTURE OPTIONS
+  -UserPassword <value>  Sample-user password (string or SecureString).
+  -SkipUsers             Default the "create sample users?" choice to No.
+  -SkipAdfs              Default the "apply ADFS policies?" choice to No.
+
+ADDUSER OPTIONS
+  -NewUserName <text>    Full display name, e.g. "Jane Smith".  (required with -NonInteractive)
+  -NewUserRole <name>    Admin | Operator | Viewer.             (required with -NonInteractive)
+  -NewUserGivenName <s>  First name   (derived from the name if omitted).
+  -NewUserSurname <s>    Last name    (derived from the name if omitted).
+  -NewUserSam <s>        SAM account  (derived: spaces -> hyphens, lowercased).
+  -NewUserUpn <s>        UPN          (defaults to <sam>@<forest>).
+  -NewUserGroups <list>  Override the role's default group list.
+
+EXAMPLES
+  .\New-BastilleAdUsers.ps1
+  .\New-BastilleAdUsers.ps1 -ReportOnly
+  .\New-BastilleAdUsers.ps1 -NonInteractive
+  .\New-BastilleAdUsers.ps1 -Mode AddUser
+  .\New-BastilleAdUsers.ps1 -Mode AddUser -NonInteractive -NewUserName "Jane Smith" -NewUserRole Operator
+
+REQUIRES
+  Run as Administrator on a domain controller. ActiveDirectory module required;
+  ADFS module required only for the ADFS policy step.
+'@
+    Write-Host $help
+}
 
 # --- Input helpers ----------------------------------------------------------
 
@@ -291,6 +350,11 @@ function Show-BastilleState {
 }
 
 # --- Main -------------------------------------------------------------------
+
+if ($Help) {
+    Show-Help
+    return
+}
 
 if (-not (Test-IsAdmin)) {
     Write-Error "This script must be run as Administrator."

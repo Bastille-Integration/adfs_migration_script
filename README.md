@@ -702,6 +702,12 @@ Run from an elevated prompt on a domain controller. With no parameters it runs t
 .\New-BastilleAdUsers.ps1
 ```
 
+### Show usage help
+
+```powershell
+.\New-BastilleAdUsers.ps1 -Help
+```
+
 ### Inventory the current state without changing anything (dry run)
 
 ```powershell
@@ -755,6 +761,7 @@ Prompts for the name, account details, and a role (Admin / Operator / Viewer), t
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `-Help` | `switch` | No | Show usage help and exit. Works without Administrator rights or the AD/ADFS modules. |
 | `-UserPassword` | `string` or `SecureString` | No | Password for the `bn-viewer` / `bn-ops` accounts. Accepts a `SecureString` (recommended) or a plain string. Seeds the password used when prompted; applied as-is under `-NonInteractive`. Defaults to the historical lab value if omitted. |
 | `-SkipUsers` | `switch` | No | Seed the "create sample users?" prompt default to **No** (and skip them outright under `-NonInteractive`). |
 | `-SkipAdfs` | `switch` | No | Seed the "apply ADFS policies?" prompt default to **No** (and skip the step outright under `-NonInteractive`). |
