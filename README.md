@@ -641,6 +641,8 @@ This script implements a finer-grained, per-product RBAC model (admin / operator
 
 The script is **idempotent** — every object is checked before creation and skipped if it already exists, so it is safe to re-run.
 
+It also prints a **"current state" report before making any changes and a "final state" report after**, listing the Bastille OUs, each group and its members, each user with its OU and group memberships, and the ADFS Web API access control policies. This makes it easy to see exactly what existed and what changed. Pass **`-ReportOnly`** to print the current state and exit without modifying anything (a dry-run inventory).
+
 1. **Reads the domain context** — `$DomainDN` (distinguished name) and `$DomainForest` (forest root DNS name) from `Get-ADDomain`.
 2. **Creates the OU tree:**
    ```
@@ -665,7 +667,7 @@ The script is **idempotent** — every object is checked before creation and ski
 
 | Group | Scope | Members (as assigned here) |
 |---|---|---|
-| `BNAdmin` | Global | `bntest` (must pre-exist) |
+| `BNAdmin` | Global | `BN Test` (must pre-exist) |
 | `DVROps` | Global | `bn-ops` |
 | `DVRViewer` | Global | `bn-viewer` |
 | `ADAMOps` | Global | `bn-ops` |
@@ -687,6 +689,12 @@ Run from an elevated prompt on a domain controller:
 
 ```powershell
 .\New-BastilleAdUsers.ps1
+```
+
+### Inventory the current state without changing anything (dry run)
+
+```powershell
+.\New-BastilleAdUsers.ps1 -ReportOnly
 ```
 
 ### Supply the sample-user password securely (instead of the default)
@@ -716,6 +724,7 @@ Run from an elevated prompt on a domain controller:
 | `-UserPassword` | `string` or `SecureString` | No | Password for the `bn-viewer` / `bn-ops` accounts. Accepts a `SecureString` (recommended) or a plain string. Defaults to the historical lab value if omitted. |
 | `-SkipUsers` | `switch` | No | Skip creating the sample users and their memberships. OUs and groups are still created. |
 | `-SkipAdfs` | `switch` | No | Skip binding the ADFS Web API access control policies (AD objects only). |
+| `-ReportOnly` | `switch` | No | Print the current Bastille AD/ADFS state and exit without making any changes. |
 
 ---
 

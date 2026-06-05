@@ -1,12 +1,16 @@
-# Version: 2.0
+# Version: 3.0
 # Requires: Run as Administrator on a domain controller (ActiveDirectory + ADFS modules)
 # Purpose: Create the Bastille OU/group/user structure and bind ADFS Web API
 #          applications to the appropriate access-control groups.
 # Notes:   Idempotent - re-running skips objects that already exist. ADFS access
 #          control policies are applied using resolved group SIDs (the value the
 #          "Permit specific group" policy expects), not bare group names.
+#          Prints a "current state" report before making changes and a "final
+#          state" report after, so you can see exactly what existed and what
+#          changed. Use -ReportOnly to print the current state and exit.
 # Examples:
 #   .\New-BastilleAdUsers.ps1
+#   .\New-BastilleAdUsers.ps1 -ReportOnly      (show current state only, change nothing)
 #   .\New-BastilleAdUsers.ps1 -UserPassword (Read-Host "Sample user password" -AsSecureString)
 #   .\New-BastilleAdUsers.ps1 -SkipAdfs        (AD objects only, no app binding)
 
@@ -20,7 +24,10 @@ param(
     [switch]$SkipAdfs,
 
     # Skip creating the sample BN Viewer / BN Ops users (still creates OUs/groups).
-    [switch]$SkipUsers
+    [switch]$SkipUsers,
+
+    # Report the current Bastille AD/ADFS state and exit without making changes.
+    [switch]$ReportOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -146,6 +153,78 @@ function ConvertTo-Secure {
     return (ConvertTo-SecureString ([string]$Value) -AsPlainText -Force)
 }
 
+function Show-BastilleState {
+    # Print a read-only snapshot of the Bastille OU tree, groups (with members),
+    # users (with their OU and group memberships), and the ADFS Web API policies.
+    param([string]$Label, [string]$BastilleOu)
+
+    Write-Host ""
+    Write-Host ("=" * 72) -ForegroundColor DarkCyan
+    Write-Host "  $Label" -ForegroundColor Cyan
+    Write-Host ("=" * 72) -ForegroundColor DarkCyan
+
+    $root = $null
+    try { $root = Get-ADOrganizationalUnit -Identity $BastilleOu -ErrorAction Stop } catch { $root = $null }
+
+    if (-not $root) {
+        Write-Host "  No '$BastilleOu' OU structure exists yet." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host ""
+        Write-Host "  Organizational Units" -ForegroundColor White
+        foreach ($ou in @(Get-ADOrganizationalUnit -SearchBase $BastilleOu -Filter * | Sort-Object DistinguishedName)) {
+            Write-Host "    $($ou.DistinguishedName)"
+        }
+
+        Write-Host ""
+        Write-Host "  Groups (members)" -ForegroundColor White
+        $groups = @(Get-ADGroup -SearchBase $BastilleOu -Filter * | Sort-Object Name)
+        if ($groups.Count -eq 0) { Write-Host "    (none)" -ForegroundColor DarkGray }
+        foreach ($g in $groups) {
+            $members = @(Get-ADGroupMember -Identity $g -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty SamAccountName)
+            $memberText = "(empty)"
+            if ($members.Count -gt 0) { $memberText = ($members -join ', ') }
+            Write-Host ("    {0,-12} {1}" -f $g.Name, $memberText)
+        }
+
+        Write-Host ""
+        Write-Host "  Users (OU / groups)" -ForegroundColor White
+        $users = @(Get-ADUser -SearchBase $BastilleOu -Filter * -Properties MemberOf | Sort-Object Name)
+        if ($users.Count -eq 0) { Write-Host "    (none)" -ForegroundColor DarkGray }
+        foreach ($u in $users) {
+            $ouName  = (($u.DistinguishedName -split ',', 2)[1] -split ',')[0] -replace '^OU=', ''
+            $grpList = @($u.MemberOf | ForEach-Object { ($_ -split ',')[0] -replace '^CN=', '' } | Sort-Object)
+            $grpText = "(no groups)"
+            if ($grpList.Count -gt 0) { $grpText = ($grpList -join ', ') }
+            $state = "enabled"
+            if (-not $u.Enabled) { $state = "DISABLED" }
+            Write-Host ("    {0,-16} [{1,-8}] OU={2,-10} groups: {3}" -f $u.SamAccountName, $state, $ouName, $grpText)
+        }
+    }
+
+    if (Get-Module -ListAvailable -Name ADFS) {
+        Import-Module ADFS -ErrorAction SilentlyContinue
+        Write-Host ""
+        Write-Host "  ADFS Web API access control policies" -ForegroundColor White
+        $targets = @(
+            'Bastille Admin - Web application',
+            'Bastille DVR and Device - Web application',
+            'Bastille Lighthouse - Web application'
+        )
+        foreach ($t in $targets) {
+            $app = Get-AdfsWebApiApplication -Name $t -ErrorAction SilentlyContinue
+            if ($app) {
+                Write-Host ("    {0,-45} {1}" -f $t, $app.AccessControlPolicyName)
+            }
+            else {
+                Write-Host ("    {0,-45} (not registered)" -f $t) -ForegroundColor DarkGray
+            }
+        }
+    }
+    Write-Host ""
+}
+
 # --- Main ---
 
 if (-not (Test-IsAdmin)) {
@@ -161,10 +240,19 @@ Import-Module ActiveDirectory -ErrorAction Stop
 
 $DomainDN     = (Get-ADDomain).DistinguishedName
 $DomainForest = (Get-ADDomain).Forest
+$bastilleDn   = "OU=Bastille,$DomainDN"
 
 Write-Host ""
 Write-Host "Domain : $DomainDN" -ForegroundColor Cyan
 Write-Host "Forest : $DomainForest" -ForegroundColor Cyan
+
+# Report the current state before touching anything.
+Show-BastilleState -Label "Current state (before changes)" -BastilleOu $bastilleDn
+
+if ($ReportOnly) {
+    Write-Host "Report-only mode (-ReportOnly): no changes made." -ForegroundColor Yellow
+    return
+}
 
 # 1. OU tree -----------------------------------------------------------------
 Write-Host ""
@@ -267,5 +355,7 @@ else {
     Write-Host "Skipping ADFS Web API policy binding (-SkipAdfs)." -ForegroundColor Yellow
 }
 
-Write-Host ""
+# Report the resulting state so the changes are easy to verify at a glance.
+Show-BastilleState -Label "Final state (after changes)" -BastilleOu $bastilleDn
+
 Write-Host "Done." -ForegroundColor Cyan
