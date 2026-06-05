@@ -36,7 +36,11 @@ function Test-IsAdmin {
 function Ensure-Ou {
     param([string]$Name, [string]$Path)
     $dn = "OU=$Name,$Path"
-    if (Get-ADOrganizationalUnit -Identity $dn -ErrorAction SilentlyContinue) {
+    # -Identity throws a terminating ADIdentityNotFoundException when the OU is
+    # absent, which -ErrorAction SilentlyContinue does not suppress; catch it.
+    $existing = $null
+    try { $existing = Get-ADOrganizationalUnit -Identity $dn -ErrorAction Stop } catch { $existing = $null }
+    if ($existing) {
         Write-Host "  [=] OU exists: $dn" -ForegroundColor DarkGray
     }
     else {
