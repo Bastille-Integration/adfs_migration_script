@@ -94,6 +94,26 @@ function Resolve-User {
     return $u
 }
 
+function Ensure-UserInOu {
+    param([string]$Member, [string]$TargetOu)
+    # Move a user into $TargetOu for organizational tidiness. OU placement does
+    # not affect ADFS access (group membership does) - this is cosmetic. Skips
+    # if the account is missing or already in the target OU.
+    $u = Resolve-User -Member $Member
+    if (-not $u) {
+        Write-Warning "  '$Member' not found - cannot move to '$TargetOu'. Skipped."
+        return
+    }
+    $currentParent = ($u.DistinguishedName -split ',', 2)[1]
+    if ($currentParent -eq $TargetOu) {
+        Write-Host "  [=] $($u.SamAccountName) already in $TargetOu" -ForegroundColor DarkGray
+    }
+    else {
+        Move-ADObject -Identity $u.DistinguishedName -TargetPath $TargetOu
+        Write-Host "  [+] $($u.SamAccountName) moved to $TargetOu" -ForegroundColor Green
+    }
+}
+
 function Ensure-Member {
     param([string]$GroupName, [string]$Member)
     $resolved = Resolve-User -Member $Member
@@ -171,6 +191,9 @@ Write-Host "Assigning administrator membership..." -ForegroundColor Cyan
 # so match on the display Name, which is consistent. Resolve-User falls back to a
 # Name filter; warn (don't fail) if the account is missing.
 Ensure-Member -GroupName "BNAdmin" -Member "BN Test"
+# Keep the admin account organized under the Admins OU (cosmetic; does not
+# affect ADFS access, which is governed by BNAdmin membership above).
+Ensure-UserInOu -Member "BN Test" -TargetOu $ouAdmins
 
 # 4. Sample users ------------------------------------------------------------
 if (-not $SkipUsers) {

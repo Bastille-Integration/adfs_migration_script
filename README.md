@@ -652,7 +652,7 @@ The script is **idempotent** — every object is checked before creation and ski
       └─ OU=Viewers
    ```
 3. **Creates five global security groups** in `OU=Groups,OU=Bastille`: `BNAdmin`, `DVROps`, `DVRViewer`, `ADAMOps`, `ADAMViewer`.
-4. **Adds the existing `bntest` account** to `BNAdmin` (warns and continues if the account is absent).
+4. **Adds the existing `BN Test` account** to `BNAdmin` (matched by display name, so it works whether the SAM account is `bntest` or `BN Test`; warns and continues if absent) and **moves it into the `Admins` OU** for tidiness. The OU move is cosmetic — ADFS access is governed by group membership, not OU placement.
 5. **Creates two enabled user accounts** (skippable with `-SkipUsers`) with `PasswordNeverExpires` and explicit SAM account names:
    - `BN Viewer` — SAM `bn-viewer`, UPN `bn-viewer@<forest>`, in `OU=Viewers`
    - `BN Ops` — SAM `bn-ops`, UPN `bn-ops@<forest>`, in `OU=Operators`
@@ -731,5 +731,5 @@ Run from an elevated prompt on a domain controller:
 - **Idempotent and safe to re-run.** OUs, groups, users, and group memberships are each checked for existence before creation, so re-running does not throw "already exists" errors.
 - **Default password is a lab value.** If `-UserPassword` is omitted, the accounts are created with a built-in default and `PasswordNeverExpires`. Pass a `SecureString` via `-UserPassword` for anything beyond a throwaway lab, and change it after first logon.
 - **Access groups are bound by SID.** The script resolves each group name to its SID and applies the `"Permit specific group"` policy as `@{ GroupParameter = $sids }` — the form ADFS expects — mirroring `Install-ADFS-pfx-From_Scratch.ps1`.
-- **The `Admins` OU is created but never populated** by this script — `BNAdmin`'s only assigned member is `bntest`, which lives elsewhere. The OU is provisioned for manual admin-account placement.
+- **The `Admins` OU** holds the `BN Test` admin account, which the script moves there once it exists (and adds to `BNAdmin`). If `BN Test` is absent, the OU is left empty for manual admin-account placement.
 - **UPNs use the forest root DNS name** (`@<forest>`). In a multi-domain forest, or where a custom UPN suffix is in use, edit the `-UserPrincipalName` values in the script to the intended suffix.
