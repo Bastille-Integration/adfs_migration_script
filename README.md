@@ -639,9 +639,13 @@ This script implements a finer-grained, per-product RBAC model (admin / operator
 
 ## What It Does
 
+The script is **interactive by default**: it prints the current state, then walks you through what to create with the standard behavior shown as the `[default]` for each prompt. **Press Enter to accept a default, or type a new value to change it.** A plan summary is shown and confirmed before any change is made. Pass **`-NonInteractive`** to accept all defaults with no prompts (automation), or **`-ReportOnly`** to print the current state and exit.
+
+You can change, per run: the base OU name, the list of security groups, the admin account added to `BNAdmin` (or skip it), whether to create the sample users (and their password), and whether to apply the ADFS policies. The sample-user details and the ADFS app→group mappings live in editable arrays (`$SampleUsers`, `$AppPolicies`) at the top of the script.
+
 The script is **idempotent** — every object is checked before creation and skipped if it already exists, so it is safe to re-run.
 
-It also prints a **"current state" report before making any changes and a "final state" report after**, listing the Bastille OUs, each group and its members, each user with its OU and group memberships, and the ADFS Web API access control policies. This makes it easy to see exactly what existed and what changed. Pass **`-ReportOnly`** to print the current state and exit without modifying anything (a dry-run inventory).
+It prints a **"current state" report before making any changes and a "final state" report after**, listing the Bastille OUs, each group and its members, each user with its OU and group memberships, and the ADFS Web API access control policies — so it is easy to see exactly what existed and what changed.
 
 1. **Reads the domain context** — `$DomainDN` (distinguished name) and `$DomainForest` (forest root DNS name) from `Get-ADDomain`.
 2. **Creates the OU tree:**
@@ -685,7 +689,7 @@ It also prints a **"current state" report before making any changes and a "final
 
 ## Usage
 
-Run from an elevated prompt on a domain controller:
+Run from an elevated prompt on a domain controller. With no parameters it runs the **interactive interview** — Enter accepts each default, and it confirms a plan before making changes:
 
 ```powershell
 .\New-BastilleAdUsers.ps1
@@ -695,6 +699,12 @@ Run from an elevated prompt on a domain controller:
 
 ```powershell
 .\New-BastilleAdUsers.ps1 -ReportOnly
+```
+
+### Accept all defaults with no prompts (automation)
+
+```powershell
+.\New-BastilleAdUsers.ps1 -NonInteractive
 ```
 
 ### Supply the sample-user password securely (instead of the default)
@@ -721,9 +731,10 @@ Run from an elevated prompt on a domain controller:
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `-UserPassword` | `string` or `SecureString` | No | Password for the `bn-viewer` / `bn-ops` accounts. Accepts a `SecureString` (recommended) or a plain string. Defaults to the historical lab value if omitted. |
-| `-SkipUsers` | `switch` | No | Skip creating the sample users and their memberships. OUs and groups are still created. |
-| `-SkipAdfs` | `switch` | No | Skip binding the ADFS Web API access control policies (AD objects only). |
+| `-UserPassword` | `string` or `SecureString` | No | Password for the `bn-viewer` / `bn-ops` accounts. Accepts a `SecureString` (recommended) or a plain string. Seeds the password used when prompted; applied as-is under `-NonInteractive`. Defaults to the historical lab value if omitted. |
+| `-SkipUsers` | `switch` | No | Seed the "create sample users?" prompt default to **No** (and skip them outright under `-NonInteractive`). |
+| `-SkipAdfs` | `switch` | No | Seed the "apply ADFS policies?" prompt default to **No** (and skip the step outright under `-NonInteractive`). |
+| `-NonInteractive` | `switch` | No | Accept all defaults with no prompts. Use for scripted/automated runs. |
 | `-ReportOnly` | `switch` | No | Print the current Bastille AD/ADFS state and exit without making any changes. |
 
 ---

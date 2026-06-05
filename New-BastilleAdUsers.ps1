@@ -1,38 +1,84 @@
-# Version: 3.0
+# Version: 4.0
 # Requires: Run as Administrator on a domain controller (ActiveDirectory + ADFS modules)
 # Purpose: Create the Bastille OU/group/user structure and bind ADFS Web API
 #          applications to the appropriate access-control groups.
-# Notes:   Idempotent - re-running skips objects that already exist. ADFS access
+# Notes:   Interactive by default - it prints the current state, then asks what
+#          to create with the standard behavior shown as the [default]. Press
+#          Enter to accept a default, or type a new value to change it. Use
+#          -NonInteractive to accept all defaults with no prompts (automation),
+#          or -ReportOnly to print the current state and exit.
+#          Idempotent - re-running skips objects that already exist. ADFS access
 #          control policies are applied using resolved group SIDs (the value the
 #          "Permit specific group" policy expects), not bare group names.
-#          Prints a "current state" report before making changes and a "final
-#          state" report after, so you can see exactly what existed and what
-#          changed. Use -ReportOnly to print the current state and exit.
 # Examples:
-#   .\New-BastilleAdUsers.ps1
+#   .\New-BastilleAdUsers.ps1                  (interactive interview)
 #   .\New-BastilleAdUsers.ps1 -ReportOnly      (show current state only, change nothing)
-#   .\New-BastilleAdUsers.ps1 -UserPassword (Read-Host "Sample user password" -AsSecureString)
-#   .\New-BastilleAdUsers.ps1 -SkipAdfs        (AD objects only, no app binding)
+#   .\New-BastilleAdUsers.ps1 -NonInteractive  (accept all defaults, no prompts)
+#   .\New-BastilleAdUsers.ps1 -SkipAdfs        (default the ADFS step to "no")
 
 [CmdletBinding()]
 param(
-    # Password for the sample BN Viewer / BN Ops accounts. Defaults to the
-    # historical lab password if not supplied. Prefer passing a SecureString.
+    # Password for the sample users. Accepts a SecureString (recommended) or a
+    # plain string. Seeds the default when prompted; used as-is in -NonInteractive.
     [object]$UserPassword = "bastille#123",
 
-    # Skip binding the ADFS Web API access control policies.
-    [switch]$SkipAdfs,
-
-    # Skip creating the sample BN Viewer / BN Ops users (still creates OUs/groups).
+    # Seed the "create sample users?" default to No.
     [switch]$SkipUsers,
 
-    # Report the current Bastille AD/ADFS state and exit without making changes.
+    # Seed the "apply ADFS policies?" default to No.
+    [switch]$SkipAdfs,
+
+    # Accept all defaults without prompting (automation / scripted runs).
+    [switch]$NonInteractive,
+
+    # Print the current Bastille AD/ADFS state and exit without making changes.
     [switch]$ReportOnly
 )
 
 $ErrorActionPreference = 'Stop'
 
-# --- Helpers ---
+# ---------------------------------------------------------------------------
+# Sample user and ADFS application definitions (the "what the script creates"
+# baseline). Edit these to change the per-user details or app->group mappings.
+# ---------------------------------------------------------------------------
+
+$SampleUsers = @(
+    [PSCustomObject]@{ Name = 'BN Viewer'; Sam = 'bn-viewer'; Given = 'BN'; Surname = 'Viewer'; Ou = 'Viewers';   Groups = @('DVRViewer', 'ADAMViewer') },
+    [PSCustomObject]@{ Name = 'BN Ops';    Sam = 'bn-ops';    Given = 'BN'; Surname = 'Ops';    Ou = 'Operators'; Groups = @('DVROps', 'ADAMOps') }
+)
+
+$AppPolicies = @(
+    [PSCustomObject]@{ TargetName = 'Bastille Admin - Web application';          Groups = @('BNAdmin') },
+    [PSCustomObject]@{ TargetName = 'Bastille DVR and Device - Web application'; Groups = @('BNAdmin', 'DVROps', 'DVRViewer') },
+    [PSCustomObject]@{ TargetName = 'Bastille Lighthouse - Web application';     Groups = @('BNAdmin', 'ADAMOps', 'ADAMViewer') }
+)
+
+# --- Input helpers ----------------------------------------------------------
+
+function Read-WithDefault {
+    param([string]$Prompt, [string]$Default)
+    $resp = Read-Host "$Prompt [$Default]"
+    if ([string]::IsNullOrWhiteSpace($resp)) { return $Default }
+    return $resp.Trim()
+}
+
+function Read-YesNo {
+    param([string]$Prompt, [bool]$Default)
+    $hint = "y/N"
+    if ($Default) { $hint = "Y/n" }
+    $resp = Read-Host "$Prompt [$hint]"
+    if ([string]::IsNullOrWhiteSpace($resp)) { return $Default }
+    return ($resp.Trim() -match '^(y|yes)$')
+}
+
+function Read-ListWithDefault {
+    param([string]$Prompt, [string[]]$Default)
+    $resp = Read-Host ("$Prompt [{0}]" -f ($Default -join ', '))
+    if ([string]::IsNullOrWhiteSpace($resp)) { return $Default }
+    return @($resp -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+# --- AD/ADFS helpers --------------------------------------------------------
 
 function Test-IsAdmin {
     $identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -207,25 +253,20 @@ function Show-BastilleState {
         Import-Module ADFS -ErrorAction SilentlyContinue
         Write-Host ""
         Write-Host "  ADFS Web API access control policies" -ForegroundColor White
-        $targets = @(
-            'Bastille Admin - Web application',
-            'Bastille DVR and Device - Web application',
-            'Bastille Lighthouse - Web application'
-        )
-        foreach ($t in $targets) {
-            $app = Get-AdfsWebApiApplication -Name $t -ErrorAction SilentlyContinue
-            if ($app) {
-                Write-Host ("    {0,-45} {1}" -f $t, $app.AccessControlPolicyName)
+        foreach ($app in $AppPolicies) {
+            $found = Get-AdfsWebApiApplication -Name $app.TargetName -ErrorAction SilentlyContinue
+            if ($found) {
+                Write-Host ("    {0,-45} {1}" -f $app.TargetName, $found.AccessControlPolicyName)
             }
             else {
-                Write-Host ("    {0,-45} (not registered)" -f $t) -ForegroundColor DarkGray
+                Write-Host ("    {0,-45} (not registered)" -f $app.TargetName) -ForegroundColor DarkGray
             }
         }
     }
     Write-Host ""
 }
 
-# --- Main ---
+# --- Main -------------------------------------------------------------------
 
 if (-not (Test-IsAdmin)) {
     Write-Error "This script must be run as Administrator."
@@ -240,122 +281,173 @@ Import-Module ActiveDirectory -ErrorAction Stop
 
 $DomainDN     = (Get-ADDomain).DistinguishedName
 $DomainForest = (Get-ADDomain).Forest
-$bastilleDn   = "OU=Bastille,$DomainDN"
 
 Write-Host ""
 Write-Host "Domain : $DomainDN" -ForegroundColor Cyan
 Write-Host "Forest : $DomainForest" -ForegroundColor Cyan
 
-# Report the current state before touching anything.
-Show-BastilleState -Label "Current state (before changes)" -BastilleOu $bastilleDn
+# Show what already exists before deciding anything.
+$baseOuName = 'Bastille'
+Show-BastilleState -Label "Current state (before changes)" -BastilleOu "OU=$baseOuName,$DomainDN"
 
 if ($ReportOnly) {
     Write-Host "Report-only mode (-ReportOnly): no changes made." -ForegroundColor Yellow
     return
 }
 
+# ---------------------------------------------------------------------------
+# Gather configuration. Defaults reflect the standard behavior; -SkipUsers /
+# -SkipAdfs seed the relevant defaults to "no". Interactive unless requested.
+# ---------------------------------------------------------------------------
+
+$adfsAvailable = [bool](Get-Module -ListAvailable -Name ADFS)
+
+$cfg = [ordered]@{
+    BaseOuName  = $baseOuName
+    Groups      = @('BNAdmin', 'DVROps', 'DVRViewer', 'ADAMOps', 'ADAMViewer')
+    AdminMember = 'BN Test'
+    CreateUsers = (-not $SkipUsers)
+    ApplyAdfs   = ((-not $SkipAdfs) -and $adfsAvailable)
+    Password    = $UserPassword
+}
+
+if (-not $NonInteractive) {
+    Write-Host ""
+    Write-Host "Configure what to create. Press Enter to accept each [default]." -ForegroundColor Cyan
+    $cfg.BaseOuName  = Read-WithDefault    "  Base OU name" $cfg.BaseOuName
+    $cfg.Groups      = Read-ListWithDefault "  Security groups (comma-separated)" $cfg.Groups
+    $cfg.AdminMember = Read-WithDefault    "  Admin account to add to BNAdmin (blank = skip)" $cfg.AdminMember
+    $cfg.CreateUsers = Read-YesNo          ("  Create sample users ({0})?" -f (($SampleUsers | ForEach-Object { $_.Name }) -join ', ')) $cfg.CreateUsers
+    if ($cfg.CreateUsers) {
+        if (Read-YesNo "    Set a custom sample-user password (else use the default)?" $false) {
+            $cfg.Password = Read-Host "    Sample-user password" -AsSecureString
+        }
+    }
+    if ($adfsAvailable) {
+        $cfg.ApplyAdfs = Read-YesNo "  Apply ADFS Web API access control policies?" $cfg.ApplyAdfs
+    }
+    else {
+        $cfg.ApplyAdfs = $false
+        Write-Host "  (ADFS module not present - the ADFS policy step will be skipped)" -ForegroundColor DarkGray
+    }
+}
+
+# Plan summary --------------------------------------------------------------
+$adminText = $cfg.AdminMember
+if ([string]::IsNullOrWhiteSpace($adminText)) { $adminText = '(skip)' }
+$usersText = 'no'
+if ($cfg.CreateUsers) { $usersText = (($SampleUsers | ForEach-Object { $_.Sam }) -join ', ') }
+$adfsText = 'no'
+if ($cfg.ApplyAdfs) { $adfsText = 'yes' }
+
+Write-Host ""
+Write-Host "Plan:" -ForegroundColor Cyan
+Write-Host "  OU tree         : OU=$($cfg.BaseOuName),$DomainDN  (+ Groups, Users\{Admins,Operators,Viewers})"
+Write-Host "  Groups          : $($cfg.Groups -join ', ')"
+Write-Host "  Admin -> BNAdmin: $adminText"
+Write-Host "  Sample users    : $usersText"
+Write-Host "  ADFS policies   : $adfsText"
+
+if (-not $NonInteractive) {
+    if (-not (Read-YesNo "Proceed with these settings?" $true)) {
+        Write-Host "Aborted - no changes made." -ForegroundColor Yellow
+        return
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Execute
+# ---------------------------------------------------------------------------
+
 # 1. OU tree -----------------------------------------------------------------
 Write-Host ""
 Write-Host "Creating OU structure..." -ForegroundColor Cyan
-$ouBastille  = Ensure-Ou -Name "Bastille"  -Path $DomainDN
+$ouBastille  = Ensure-Ou -Name $cfg.BaseOuName -Path $DomainDN
 $ouGroups    = Ensure-Ou -Name "Groups"    -Path $ouBastille
 $ouUsers     = Ensure-Ou -Name "Users"     -Path $ouBastille
 $ouAdmins    = Ensure-Ou -Name "Admins"    -Path $ouUsers
 $ouOperators = Ensure-Ou -Name "Operators" -Path $ouUsers
 $ouViewers   = Ensure-Ou -Name "Viewers"   -Path $ouUsers
+$ouByName = @{ 'Admins' = $ouAdmins; 'Operators' = $ouOperators; 'Viewers' = $ouViewers }
 
 # 2. Security groups ---------------------------------------------------------
 Write-Host ""
 Write-Host "Creating security groups..." -ForegroundColor Cyan
-$groupNames = @('BNAdmin', 'DVROps', 'DVRViewer', 'ADAMOps', 'ADAMViewer')
-foreach ($name in $groupNames) { Ensure-Group -Name $name -Path $ouGroups | Out-Null }
+foreach ($name in $cfg.Groups) { Ensure-Group -Name $name -Path $ouGroups | Out-Null }
 
 # 3. Pre-existing admin account membership -----------------------------------
-Write-Host ""
-Write-Host "Assigning administrator membership..." -ForegroundColor Cyan
-# The 'BN Test' account is created elsewhere (Install-ADFS-pfx-From_Scratch.ps1
-# -CreateTestUsers, or by hand), not here. Its SamAccountName varies by
-# environment ('bntest' from the installer, 'BN Test' when created via the GUI),
-# so match on the display Name, which is consistent. Resolve-User falls back to a
-# Name filter; warn (don't fail) if the account is missing.
-Ensure-Member -GroupName "BNAdmin" -Member "BN Test"
-# Keep the admin account organized under the Admins OU (cosmetic; does not
-# affect ADFS access, which is governed by BNAdmin membership above).
-Ensure-UserInOu -Member "BN Test" -TargetOu $ouAdmins
+if (-not [string]::IsNullOrWhiteSpace($cfg.AdminMember)) {
+    Write-Host ""
+    Write-Host "Assigning administrator membership..." -ForegroundColor Cyan
+    # The admin account is created elsewhere, not here. Its SamAccountName varies
+    # by environment ('bntest' from the installer, 'BN Test' from the GUI), so
+    # Resolve-User matches on display Name too. Warn (don't fail) if missing.
+    Ensure-Member -GroupName "BNAdmin" -Member $cfg.AdminMember
+    # Keep the admin account organized under the Admins OU (cosmetic; ADFS access
+    # is governed by BNAdmin membership above, not OU placement).
+    Ensure-UserInOu -Member $cfg.AdminMember -TargetOu $ouAdmins
+}
 
 # 4. Sample users ------------------------------------------------------------
-if (-not $SkipUsers) {
+if ($cfg.CreateUsers) {
     Write-Host ""
     Write-Host "Creating sample users..." -ForegroundColor Cyan
-    $securePassword = ConvertTo-Secure -Value $UserPassword
+    $securePassword = ConvertTo-Secure -Value $cfg.Password
 
-    Ensure-User -Name "BN Viewer" -GivenName "BN" -Surname "Viewer" `
-        -SamAccountName "bn-viewer" -Upn "bn-viewer@$DomainForest" `
-        -Password $securePassword -Path $ouViewers | Out-Null
-
-    Ensure-User -Name "BN Ops" -GivenName "BN" -Surname "Ops" `
-        -SamAccountName "bn-ops" -Upn "bn-ops@$DomainForest" `
-        -Password $securePassword -Path $ouOperators | Out-Null
+    foreach ($su in $SampleUsers) {
+        $targetOu = $ouByName[$su.Ou]
+        if (-not $targetOu) { $targetOu = $ouUsers }
+        Ensure-User -Name $su.Name -GivenName $su.Given -Surname $su.Surname `
+            -SamAccountName $su.Sam -Upn "$($su.Sam)@$DomainForest" `
+            -Password $securePassword -Path $targetOu | Out-Null
+    }
 
     Write-Host ""
     Write-Host "Assigning sample-user memberships..." -ForegroundColor Cyan
-    Ensure-Member -GroupName "DVRViewer"  -Member "bn-viewer"
-    Ensure-Member -GroupName "ADAMViewer" -Member "bn-viewer"
-    Ensure-Member -GroupName "DVROps"     -Member "bn-ops"
-    Ensure-Member -GroupName "ADAMOps"    -Member "bn-ops"
+    foreach ($su in $SampleUsers) {
+        foreach ($grp in $su.Groups) { Ensure-Member -GroupName $grp -Member $su.Sam }
+    }
 }
 else {
     Write-Host ""
-    Write-Host "Skipping sample users (-SkipUsers)." -ForegroundColor Yellow
+    Write-Host "Skipping sample users." -ForegroundColor Yellow
 }
 
 # 5. ADFS Web API access control policies ------------------------------------
-if (-not $SkipAdfs) {
+if ($cfg.ApplyAdfs) {
     Write-Host ""
     Write-Host "Binding ADFS Web API access control policies..." -ForegroundColor Cyan
+    Import-Module ADFS -ErrorAction Stop
 
-    if (-not (Get-Module -ListAvailable -Name ADFS)) {
-        Write-Warning "ADFS module not available - skipping Web API policy binding. Re-run on an ADFS node, or use -SkipAdfs to silence this."
-    }
-    else {
-        Import-Module ADFS -ErrorAction Stop
-
-        $appPolicies = @(
-            [PSCustomObject]@{ TargetName = 'Bastille Admin - Web application';          Groups = @('BNAdmin') },
-            [PSCustomObject]@{ TargetName = 'Bastille DVR and Device - Web application'; Groups = @('BNAdmin', 'DVROps', 'DVRViewer') },
-            [PSCustomObject]@{ TargetName = 'Bastille Lighthouse - Web application';     Groups = @('BNAdmin', 'ADAMOps', 'ADAMViewer') }
-        )
-
-        foreach ($app in $appPolicies) {
-            $target = Get-AdfsWebApiApplication -Name $app.TargetName -ErrorAction SilentlyContinue
-            if (-not $target) {
-                Write-Warning "  Web API application not found: '$($app.TargetName)' - skipped. (Register it in ADFS first.)"
-                continue
-            }
-
-            $sids = @()
-            foreach ($g in $app.Groups) {
-                $sid = Resolve-GroupSid -GroupName $g
-                if ($sid) { $sids += $sid }
-            }
-            if ($sids.Count -eq 0) {
-                Write-Warning "  No group SIDs resolved for '$($app.TargetName)' - skipped."
-                continue
-            }
-
-            Set-AdfsWebApiApplication -TargetName $app.TargetName `
-                -AccessControlPolicyName "Permit specific group" `
-                -AccessControlPolicyParameters @{ GroupParameter = $sids }
-            Write-Host "  [+] $($app.TargetName) -> $($app.Groups -join ', ')" -ForegroundColor Green
+    foreach ($app in $AppPolicies) {
+        $target = Get-AdfsWebApiApplication -Name $app.TargetName -ErrorAction SilentlyContinue
+        if (-not $target) {
+            Write-Warning "  Web API application not found: '$($app.TargetName)' - skipped. (Register it in ADFS first.)"
+            continue
         }
+
+        $sids = @()
+        foreach ($g in $app.Groups) {
+            $sid = Resolve-GroupSid -GroupName $g
+            if ($sid) { $sids += $sid }
+        }
+        if ($sids.Count -eq 0) {
+            Write-Warning "  No group SIDs resolved for '$($app.TargetName)' - skipped."
+            continue
+        }
+
+        Set-AdfsWebApiApplication -TargetName $app.TargetName `
+            -AccessControlPolicyName "Permit specific group" `
+            -AccessControlPolicyParameters @{ GroupParameter = $sids }
+        Write-Host "  [+] $($app.TargetName) -> $($app.Groups -join ', ')" -ForegroundColor Green
     }
 }
 else {
     Write-Host ""
-    Write-Host "Skipping ADFS Web API policy binding (-SkipAdfs)." -ForegroundColor Yellow
+    Write-Host "Skipping ADFS Web API policy binding." -ForegroundColor Yellow
 }
 
 # Report the resulting state so the changes are easy to verify at a glance.
-Show-BastilleState -Label "Final state (after changes)" -BastilleOu $bastilleDn
+Show-BastilleState -Label "Final state (after changes)" -BastilleOu "OU=$($cfg.BaseOuName),$DomainDN"
 
 Write-Host "Done." -ForegroundColor Cyan
