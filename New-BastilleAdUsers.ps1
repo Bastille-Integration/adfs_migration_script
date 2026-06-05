@@ -165,10 +165,12 @@ foreach ($name in $groupNames) { Ensure-Group -Name $name -Path $ouGroups | Out-
 # 3. Pre-existing admin account membership -----------------------------------
 Write-Host ""
 Write-Host "Assigning administrator membership..." -ForegroundColor Cyan
-# 'BN Test' (SamAccountName 'bntest') is created by
-# Install-ADFS-pfx-From_Scratch.ps1 -CreateTestUsers, not here. Add it to
-# BNAdmin if present; warn (don't fail) if it is missing.
-Ensure-Member -GroupName "BNAdmin" -Member "bntest"
+# The 'BN Test' account is created elsewhere (Install-ADFS-pfx-From_Scratch.ps1
+# -CreateTestUsers, or by hand), not here. Its SamAccountName varies by
+# environment ('bntest' from the installer, 'BN Test' when created via the GUI),
+# so match on the display Name, which is consistent. Resolve-User falls back to a
+# Name filter; warn (don't fail) if the account is missing.
+Ensure-Member -GroupName "BNAdmin" -Member "BN Test"
 
 # 4. Sample users ------------------------------------------------------------
 if (-not $SkipUsers) {
