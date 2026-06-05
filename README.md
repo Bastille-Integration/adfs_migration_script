@@ -5,6 +5,7 @@
 | `Install-ADFS-pfx-From_Scratch.ps1` | Fresh ADFS deployment — installs the Windows feature, configures the farm, creates AD groups and users, registers all Bastille application groups, and applies access control policies. |
 | `Install-ADFS-pfx-Redirects.ps1` | Certificate migration — replaces an existing ADFS self-signed certificate with a PFX and updates all hostname references. |
 | `Invoke-AdfsTroubleshoot.ps1` | Troubleshooting — checks ADFS service health, certificate expiry, recent event log errors, and AD/ADFS account lockout status. Can list all locked accounts or target a specific user and unlock them. |
+| `New-BastilleAdUsers.ps1` | Provisioning — creates the Bastille OU tree, role-based AD groups (admin/ops/viewer per product), sample users, and binds the Admin, DVR/Device, and Lighthouse ADFS Web API applications to those groups via "Permit specific group" policies. |
 
 ---
 
@@ -618,3 +619,117 @@ After enabling, auth failures will appear in `Event Viewer > Windows Logs > Secu
 - The script is read-only except when `-Unlock` is used (or the user confirms an unlock interactively).
 - ADFS extranet lockout reset requires ADFS 2016 or later with Smart Lockout enabled (`Set-AdfsProperties -EnableExtranetLockout $true`). The check is silently skipped on older versions or when lockout is disabled.
 - The script requires PowerShell to be running as Administrator. It will exit immediately if the privilege check fails.
+
+---
+
+# New-BastilleAdUsers.ps1
+
+Provisions the Bastille Active Directory structure — organizational units, role-based security groups, and sample user accounts — then binds the Bastille ADFS Web API applications to those groups using "Permit specific group" access control policies.
+
+This script implements a finer-grained, per-product RBAC model (admin / operator / viewer) and is distinct from the simpler `Bastille Admins` / `Bastille Users` scheme created by `Install-ADFS-pfx-From_Scratch.ps1`.
+
+## Requirements
+
+- Must be run **as Administrator** on a **domain controller** (or a host with both modules available) — the script enforces the privilege check and exits if it fails
+- The **Active Directory** PowerShell module (`RSAT-AD-PowerShell`) — for OU, group, and user creation (required; the script exits if absent)
+- The **ADFS** module — for the `Set-AdfsWebApiApplication` access control steps (optional; the ADFS step is skipped with a warning if the module is unavailable)
+- The three target ADFS Web API applications must already be registered (see [Prerequisites and dependencies](#prerequisites-and-dependencies))
+
+---
+
+## What It Does
+
+The script is **idempotent** — every object is checked before creation and skipped if it already exists, so it is safe to re-run.
+
+1. **Reads the domain context** — `$DomainDN` (distinguished name) and `$DomainForest` (forest root DNS name) from `Get-ADDomain`.
+2. **Creates the OU tree:**
+   ```
+   OU=Bastille,<DomainDN>
+   ├─ OU=Groups
+   └─ OU=Users
+      ├─ OU=Admins
+      ├─ OU=Operators
+      └─ OU=Viewers
+   ```
+3. **Creates five global security groups** in `OU=Groups,OU=Bastille`: `BNAdmin`, `DVROps`, `DVRViewer`, `ADAMOps`, `ADAMViewer`.
+4. **Adds the existing `bntest` account** to `BNAdmin` (warns and continues if the account is absent).
+5. **Creates two enabled user accounts** (skippable with `-SkipUsers`) with `PasswordNeverExpires` and explicit SAM account names:
+   - `BN Viewer` — SAM `bn-viewer`, UPN `bn-viewer@<forest>`, in `OU=Viewers`
+   - `BN Ops` — SAM `bn-ops`, UPN `bn-ops@<forest>`, in `OU=Operators`
+6. **Assigns group memberships:**
+   - `bn-viewer` → `DVRViewer`, `ADAMViewer`
+   - `bn-ops` → `DVROps`, `ADAMOps`
+7. **Binds three ADFS Web API applications** to "Permit specific group" policies, resolving each group to its **SID** first (skippable with `-SkipAdfs`). Apps that are not registered under the expected name are skipped with a warning.
+
+### Groups and roles
+
+| Group | Scope | Members (as assigned here) |
+|---|---|---|
+| `BNAdmin` | Global | `bntest` (must pre-exist) |
+| `DVROps` | Global | `bn-ops` |
+| `DVRViewer` | Global | `bn-viewer` |
+| `ADAMOps` | Global | `bn-ops` |
+| `ADAMViewer` | Global | `bn-viewer` |
+
+### ADFS application access control
+
+| Web API `TargetName` | Permitted groups |
+|---|---|
+| `Bastille Admin - Web application` | `BNAdmin` |
+| `Bastille DVR and Device - Web application` | `BNAdmin`, `DVROps`, `DVRViewer` |
+| `Bastille Lighthouse - Web application` | `BNAdmin`, `ADAMOps`, `ADAMViewer` |
+
+---
+
+## Usage
+
+Run from an elevated prompt on a domain controller:
+
+```powershell
+.\New-BastilleAdUsers.ps1
+```
+
+### Supply the sample-user password securely (instead of the default)
+
+```powershell
+.\New-BastilleAdUsers.ps1 -UserPassword (Read-Host "Sample user password" -AsSecureString)
+```
+
+### Create the AD objects only, without touching ADFS
+
+```powershell
+.\New-BastilleAdUsers.ps1 -SkipAdfs
+```
+
+### Bind ADFS policies against pre-existing groups, without creating sample users
+
+```powershell
+.\New-BastilleAdUsers.ps1 -SkipUsers
+```
+
+---
+
+## Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `-UserPassword` | `string` or `SecureString` | No | Password for the `bn-viewer` / `bn-ops` accounts. Accepts a `SecureString` (recommended) or a plain string. Defaults to the historical lab value if omitted. |
+| `-SkipUsers` | `switch` | No | Skip creating the sample users and their memberships. OUs and groups are still created. |
+| `-SkipAdfs` | `switch` | No | Skip binding the ADFS Web API access control policies (AD objects only). |
+
+---
+
+## Prerequisites and dependencies
+
+- **`bntest` must already exist.** The script adds `bntest` to `BNAdmin` but does not create it — that account is created by `Install-ADFS-pfx-From_Scratch.ps1 -CreateTestUsers`. If it is absent, the membership step warns and continues; the rest of the script is unaffected.
+- **The three Web API applications must already be registered** in ADFS under the exact `TargetName` values above. Note the `" - Web application"` suffix — this matches application groups created through the **ADFS management console wizard** (web-application template). It does **not** match the `" - Web API"` names that `Install-ADFS-pfx-From_Scratch.ps1` registers, nor does `Bastille Lighthouse` correspond to any application group created by that script (which registers `Bastille ADAM` and `Bastille ADAM API`). The script checks each application by name and skips any it cannot find with a warning — confirm the targets exist under these names before relying on the binding.
+
+---
+
+## Important Notes
+
+- **Idempotent and safe to re-run.** OUs, groups, users, and group memberships are each checked for existence before creation, so re-running does not throw "already exists" errors.
+- **Default password is a lab value.** If `-UserPassword` is omitted, the accounts are created with a built-in default and `PasswordNeverExpires`. Pass a `SecureString` via `-UserPassword` for anything beyond a throwaway lab, and change it after first logon.
+- **Access groups are bound by SID.** The script resolves each group name to its SID and applies the `"Permit specific group"` policy as `@{ GroupParameter = $sids }` — the form ADFS expects — mirroring `Install-ADFS-pfx-From_Scratch.ps1`.
+- **The `Admins` OU is created but never populated** by this script — `BNAdmin`'s only assigned member is `bntest`, which lives elsewhere. The OU is provisioned for manual admin-account placement.
+- **UPNs use the forest root DNS name** (`@<forest>`). In a multi-domain forest, or where a custom UPN suffix is in use, edit the `-UserPrincipalName` values in the script to the intended suffix.
