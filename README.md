@@ -650,9 +650,9 @@ In both modes it prints the current state, walks you through the choices with th
 
 In **RBAC restructuring** you can change, per run: the base OU name, the list of security groups, the admin account added to `BNAdmin` (or skip it), whether to create the sample users (and their password), and whether to apply the ADFS policies. The sample-user details, the ADFS app→group mappings, and the role definitions live in editable arrays (`$SampleUsers`, `$AppPolicies`, `$Roles`) at the top of the script.
 
-The script is **idempotent** — every object is checked before creation and skipped if it already exists, so it is safe to re-run.
+The script is **idempotent** — every object is checked before creation and skipped if it already exists, so it is safe to re-run — and **additive**: it never removes a user from a group or deletes a renamed/removed object, so it will not reconcile drift. It is also **resilient**: each change is attempted independently, and any failures are collected and reported in a summary at the end rather than aborting the run.
 
-It prints a **"current state" report before making any changes and a "final state" report after**, listing the Bastille OUs, each group and its members, each user with its OU and group memberships, and the ADFS Web API access control policies — so it is easy to see exactly what existed and what changed.
+It prints a **"current state" report before making any changes and a "final state" report after**, listing the Bastille OUs, each group and its members, each user with its OU and group memberships, and the ADFS Web API access control policies — so it is easy to see exactly what existed and what changed. It supports the standard **`-WhatIf`** / **`-Confirm`** parameters (preview or confirm each change), and writes a **transcript log** of each run (see `-LogPath`).
 
 1. **Reads the domain context** — `$DomainDN` (distinguished name) and `$DomainForest` (forest root DNS name) from `Get-ADDomain`.
 2. **Creates the OU tree:**
@@ -666,7 +666,7 @@ It prints a **"current state" report before making any changes and a "final stat
    ```
 3. **Creates five global security groups** in `OU=Groups,OU=Bastille`: `BNAdmin`, `DVROps`, `DVRViewer`, `ADAMOps`, `ADAMViewer`.
 4. **Adds the existing `BN Test` account** to `BNAdmin` (matched by display name, so it works whether the SAM account is `bntest` or `BN Test`; warns and continues if absent) and **moves it into the `Admins` OU** for tidiness. The OU move is cosmetic — ADFS access is governed by group membership, not OU placement.
-5. **Creates two enabled user accounts** (skippable with `-SkipUsers`) with `PasswordNeverExpires` and explicit SAM account names:
+5. **Creates two enabled user accounts** (skippable with `-SkipUsers`) with explicit SAM account names and non-expiring passwords (controllable via `-PasswordNeverExpires`):
    - `BN Viewer` — SAM `bn-viewer`, UPN `bn-viewer@<forest>`, in `OU=Viewers`
    - `BN Ops` — SAM `bn-ops`, UPN `bn-ops@<forest>`, in `OU=Operators`
 6. **Assigns group memberships:**
@@ -720,6 +720,12 @@ Run from an elevated prompt on a domain controller. With no parameters it runs t
 .\New-BastilleAdUsers.ps1 -NonInteractive
 ```
 
+### Preview the whole restructuring without making changes
+
+```powershell
+.\New-BastilleAdUsers.ps1 -NonInteractive -WhatIf
+```
+
 ### Add a single user to the existing structure (interactive)
 
 ```powershell
@@ -762,7 +768,9 @@ Prompts for the name, account details, and a role (Admin / Operator / Viewer), t
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `-Help` | `switch` | No | Show usage help and exit. Works without Administrator rights or the AD/ADFS modules. |
-| `-UserPassword` | `string` or `SecureString` | No | Password for the `bn-viewer` / `bn-ops` accounts. Accepts a `SecureString` (recommended) or a plain string. Seeds the password used when prompted; applied as-is under `-NonInteractive`. Defaults to the historical lab value if omitted. |
+| `-BaseOuName` | `string` | No | Name of the base OU under the domain root. Default: `Bastille`. Used by all modes and by `-ReportOnly`. |
+| `-UserPassword` | `string` or `SecureString` | No | Password for created users. Accepts a `SecureString` (recommended) or a plain string. Seeds the password used when prompted; applied as-is under `-NonInteractive`. Defaults to the historical lab value if omitted. |
+| `-PasswordNeverExpires` | `bool` | No | Whether created accounts have non-expiring passwords. Default: `$true` (lab convenience). Use `-PasswordNeverExpires:$false` to honor the domain password policy. |
 | `-SkipUsers` | `switch` | No | Seed the "create sample users?" prompt default to **No** (and skip them outright under `-NonInteractive`). |
 | `-SkipAdfs` | `switch` | No | Seed the "apply ADFS policies?" prompt default to **No** (and skip the step outright under `-NonInteractive`). |
 | `-NonInteractive` | `switch` | No | Accept all defaults with no prompts. Use for scripted/automated runs. |
@@ -775,6 +783,8 @@ Prompts for the name, account details, and a role (Admin / Operator / Viewer), t
 | `-NewUserUpn` | `string` | No | *(AddUser)* UPN. Defaults to `<sam>@<forest>` if omitted. |
 | `-NewUserRole` | `string` | No | *(AddUser)* `Admin`, `Operator`, or `Viewer` — sets the target OU and default groups. Required for AddUser under `-NonInteractive`. |
 | `-NewUserGroups` | `string[]` | No | *(AddUser)* Override the role's default group list. |
+| `-LogPath` | `string` | No | Transcript log file path. Defaults to a timestamped file beside the script. Skipped under `-WhatIf`. |
+| `-WhatIf` / `-Confirm` | `switch` | No | Standard PowerShell risk-mitigation parameters. `-WhatIf` previews every change without making it; `-Confirm` prompts before each one. |
 
 ---
 
@@ -787,8 +797,9 @@ Prompts for the name, account details, and a role (Admin / Operator / Viewer), t
 
 ## Important Notes
 
-- **Idempotent and safe to re-run.** OUs, groups, users, and group memberships are each checked for existence before creation, so re-running does not throw "already exists" errors.
-- **Default password is a lab value.** If `-UserPassword` is omitted, the accounts are created with a built-in default and `PasswordNeverExpires`. Pass a `SecureString` via `-UserPassword` for anything beyond a throwaway lab, and change it after first logon.
+- **Idempotent, additive, and resilient.** Objects are checked before creation, so re-running does not throw "already exists" errors. The script never removes memberships or deletes objects (no drift reconciliation). Individual failures are collected and printed in an end-of-run summary instead of aborting the run.
+- **Dry-run and audit.** Use `-ReportOnly` (state only) or `-WhatIf` (preview every change) before a real run. Each real run writes a transcript log (`-LogPath`, default a timestamped file beside the script).
+- **Default password is a lab value.** If `-UserPassword` is omitted, accounts use a built-in default; passwords are non-expiring unless you pass `-PasswordNeverExpires:$false`. Pass a `SecureString` via `-UserPassword` for anything beyond a throwaway lab, and change it after first logon.
 - **Access groups are bound by SID.** The script resolves each group name to its SID and applies the `"Permit specific group"` policy as `@{ GroupParameter = $sids }` — the form ADFS expects — mirroring `Install-ADFS-pfx-From_Scratch.ps1`.
 - **The `Admins` OU** holds the `BN Test` admin account, which the script moves there once it exists (and adds to `BNAdmin`). If `BN Test` is absent, the OU is left empty for manual admin-account placement.
 - **UPNs use the forest root DNS name** (`@<forest>`). In a multi-domain forest, or where a custom UPN suffix is in use, edit the `-UserPrincipalName` values in the script to the intended suffix.
