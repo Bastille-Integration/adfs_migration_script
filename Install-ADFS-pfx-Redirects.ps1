@@ -1182,7 +1182,11 @@ function Update-CorsTrustedOrigins {
 
     $existing = @()
     if ($null -ne $headers.CORSTrustedOrigins) {
-        $existing = @($headers.CORSTrustedOrigins)
+        $existing = @(
+            ($headers.CORSTrustedOrigins -join ',') -split ',' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
     }
 
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -1295,7 +1299,7 @@ function Update-CorsTrustedOrigins {
     }
 
     try {
-        Set-AdfsResponseHeaders -CORSTrustedOrigins $combined.ToArray() -ErrorAction Stop
+        Set-AdfsResponseHeaders -CORSTrustedOrigins ($combined.ToArray() -join ',') -ErrorAction Stop
         Write-Host "CORS updated successfully." -ForegroundColor Green
     }
     catch {
