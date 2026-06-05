@@ -15,6 +15,12 @@
       AddUser      Add one user to an already-built structure, by role
                    (Admin / Operator / Viewer).
 
+    This script covers only the IDENTITY half of RBAC (AD + ADFS). The
+    application half - granting each role its privileges inside the Fusion
+    Center / ADAM - is done afterward in the Bastille Tools web app
+    (bastille-tool.html, "RBAC Manager" tab). The script prints next-step
+    guidance for that and does NOT contact the Fusion Center or ADAM itself.
+
     The script is idempotent (existing objects are skipped) and additive - it
     never removes a user from a group or deletes a renamed/removed group, so it
     will not reconcile drift. Each change is attempted independently; failures
@@ -238,6 +244,12 @@ EXAMPLES
   .\New-BastilleAdUsers.ps1 -NonInteractive -WhatIf
   .\New-BastilleAdUsers.ps1 -Mode AddUser
   .\New-BastilleAdUsers.ps1 -Mode AddUser -NonInteractive -NewUserName "Jane Smith" -NewUserRole Operator
+
+SCOPE
+  Sets up the IDENTITY half of RBAC only (AD + ADFS). Granting each role its
+  privileges inside the Fusion Center / ADAM is done afterward in the Bastille
+  Tools web app (RBAC Manager). This script prints guidance for that and does
+  not contact the Fusion Center or ADAM.
 
 REQUIRES
   Run as Administrator on a domain controller. ActiveDirectory module required;
@@ -519,6 +531,43 @@ function Show-Summary {
         Write-Host "Done - no warnings." -ForegroundColor Cyan
     }
     if ($script:TranscriptStarted) { Write-Host "Log: $script:LogFile" -ForegroundColor DarkGray }
+}
+
+function Show-NextSteps {
+    # The AD/ADFS side is only the identity half of RBAC. The application half
+    # (privileges inside the Fusion Center / ADAM) is done in the Bastille Tools
+    # web app, NOT by this script. Tell the operator exactly what to do next.
+    Write-Host ""
+    Write-Host ("=" * 72) -ForegroundColor DarkCyan
+    Write-Host "  Next steps - finish RBAC in the Bastille Tools web app" -ForegroundColor Cyan
+    Write-Host ("=" * 72) -ForegroundColor DarkCyan
+    Write-Host @"
+  This script set up the IDENTITY half of RBAC in Active Directory and ADFS:
+  the OUs, the security groups, and the ADFS policies that send each user's
+  group names to the Bastille apps as 'role' claims.
+
+  The other half - granting each role its PRIVILEGES inside the Fusion Center
+  and ADAM - is done in the Bastille Tools web app (bastille-tool.html), on its
+  "RBAC Manager" tab. Until you do that, users can sign in but will see a blank
+  screen or 'access denied'. This script does NOT talk to the Fusion Center or
+  ADAM; you do that step in the web tool.
+
+  In the web app -> RBAC Manager:
+    1. Connect to your Fusion Center (API URL + API key), and ADAM if you use it.
+    2. On the Personas tab, apply the persona whose name matches each AD group
+       this script created. The names line up on purpose:
+"@ -ForegroundColor Gray
+    Write-Host "         DVROps      -> apply to Fusion Center" -ForegroundColor Gray
+    Write-Host "         DVRViewer   -> apply to Fusion Center" -ForegroundColor Gray
+    Write-Host "         ADAMOps     -> apply to ADAM" -ForegroundColor Gray
+    Write-Host "         ADAMViewer  -> apply to ADAM" -ForegroundColor Gray
+    Write-Host "         BNAdmin     -> full access on BOTH (assign the '*' / '*' privilege)" -ForegroundColor Gray
+    Write-Host @"
+    3. Use the same role name as the group name, so the ADFS claim matches.
+
+  Tip: this script's -ReportOnly shows the AD/ADFS side anytime; the web app's
+  RBAC Manager shows what privileges currently exist in the FC / ADAM.
+"@ -ForegroundColor Gray
 }
 
 # --- Main -------------------------------------------------------------------
@@ -862,6 +911,10 @@ try {
     # Report the resulting state, then summarize.
     Show-BastilleState -Label "Final state (after changes)" -BastilleOu "OU=$($script:EffectiveBaseOu),$DomainDN"
     Show-Summary
+
+    # After a full restructure, point the operator at the web tool for the
+    # application-layer (Fusion Center / ADAM) half of RBAC.
+    if ($opMode -eq 'Restructure') { Show-NextSteps }
 }
 finally {
     if ($script:TranscriptStarted) {

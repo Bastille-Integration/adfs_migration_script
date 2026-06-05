@@ -639,6 +639,8 @@ This script implements a finer-grained, per-product RBAC model (admin / operator
 
 ## What It Does
 
+> **Scope:** This script sets up the **identity half** of Bastille RBAC — Active Directory and ADFS. The **application half** (granting each role its privileges inside the Fusion Center / ADAM) is done afterward in the **Bastille Tools web app** (`bastille-tool.html`, "RBAC Manager" tab). The script does **not** contact the Fusion Center or ADAM; after a restructure it prints step-by-step guidance for that follow-up. The AD group names it creates (`DVROps`, `DVRViewer`, `ADAMOps`, `ADAMViewer`, `BNAdmin`) match the web tool's personas on purpose, so the ADFS role claims line up.
+
 The script is **interactive by default** and starts by asking which of two operations to run:
 
 | Mode | What it does |
