@@ -1,11 +1,23 @@
 # ADFS PFX Deployment Scripts
 
-| Script | Purpose |
+PowerShell scripts for standing up, securing, and maintaining ADFS for the Bastille platform — deploying ADFS with a PFX certificate, migrating that certificate, provisioning role-based access, and troubleshooting.
+
+| Script | One-liner |
 |---|---|
-| `Install-ADFS-pfx-From_Scratch.ps1` | Fresh ADFS deployment — installs the Windows feature, configures the farm, creates AD groups and users, registers all Bastille application groups, and applies access control policies. |
-| `Install-ADFS-pfx-Redirects.ps1` | Certificate migration — replaces an existing ADFS self-signed certificate with a PFX and updates all hostname references. |
-| `Invoke-AdfsTroubleshoot.ps1` | Troubleshooting — checks ADFS service health, certificate expiry, recent event log errors, and AD/ADFS account lockout status. Can list all locked accounts or target a specific user and unlock them. |
-| `New-BastilleAdUsers.ps1` | Provisioning — creates the Bastille OU tree, role-based AD groups (admin/ops/viewer per product), sample users, and binds the Admin, DVR/Device, and Lighthouse ADFS Web API applications to those groups via "Permit specific group" policies. |
+| `Install-ADFS-pfx-From_Scratch.ps1` | First-time, end-to-end ADFS stand-up from a PFX certificate. |
+| `Install-ADFS-pfx-Redirects.ps1` | Migrate an existing ADFS deployment to a new PFX certificate / domain. |
+| `New-BastilleAdUsers.ps1` | Guided RBAC provisioning of the AD + ADFS identity layer. |
+| `Invoke-AdfsTroubleshoot.ps1` | ADFS health, certificate, and account-lockout diagnostics. |
+
+## What each script does
+
+**`Install-ADFS-pfx-From_Scratch.ps1`** — Run **once** on a fresh ADFS node. Installs the ADFS + IIS Windows features, configures the federation farm, imports and binds the PFX certificate (both the ADFS config store and the kernel HTTP.SYS bindings), enables CORS, creates the baseline AD groups and test users, registers every Bastille application group with its OAuth clients / Web APIs / claim rules, and applies per-group access-control policies.
+
+**`Install-ADFS-pfx-Redirects.ps1`** — Run when **rotating or replacing** the ADFS certificate, or moving domains. Imports a new PFX and rewrites every hostname reference — native-app redirect URIs, CORS trusted origins, and Federation Service properties — from the old domain suffix to the new one, rebinds the certificate (config store + HTTP.SYS), and restarts the service.
+
+**`New-BastilleAdUsers.ps1`** — Guided, interactive provisioning of the **identity half** of Bastille RBAC (Active Directory + ADFS). Creates the Bastille OU tree, the role-based security groups (`DVROps`, `DVRViewer`, `ADAMOps`, `ADAMViewer`, `BNAdmin`), sample users, and the ADFS Web API access-control policies; can also add a single user by role (Admin / Operator / Viewer). The **application half** (privileges inside the Fusion Center / ADAM) is completed afterward in the Bastille Tools web app — the script prints step-by-step guidance for it and never contacts those systems. Supports `-ReportOnly`, `-WhatIf`, `-NonInteractive`, and `-Help`.
+
+**`Invoke-AdfsTroubleshoot.ps1`** — Day-to-day, read-only diagnostics for an ADFS node: service status, certificate expiry, recent event-log errors, and AD / ADFS extranet account-lockout state. Can list all locked accounts, or target one user and unlock them (both AD and ADFS) in a single pass.
 
 ---
 
