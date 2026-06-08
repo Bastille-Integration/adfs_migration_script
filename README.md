@@ -273,7 +273,7 @@ The script performs the following steps in order:
 5. **Prompts for (or accepts) the target ADFS hostname** — the FQDN the Federation Service will use after migration. Validated against the certificate SANs. Supply via `-TargetAdfsHostname` to skip the prompt.
 6. **Updates redirect URIs** on all ADFS native client applications.
 7. **Updates Federation Service Properties** (DisplayName, HostName, Identifier).
-8. **Resolves and confirms CORS Trusted Origins** — automatically identifies the admin, DVR, device, and explorer hostnames from the certificate SANs, combines them with the ADFS hostname and any `-CorsExtraOrigins`, shows the full proposed list, and prompts the operator to confirm before applying.
+8. **Resolves and confirms CORS Trusted Origins** — builds the full origin list from two sources: (1) cert SANs, matched by service label (`admin`, `dvr`, `device`, `explorer`) for host-specific certs; (2) the redirect URIs of all registered native apps, which covers wildcard-cert deployments where app hostnames do not appear individually in the cert. The ADFS hostname is always first. Any `-CorsExtraOrigins` are appended, duplicates are removed, the complete list is shown, and the operator confirms before it is applied as a single atomic update.
 9. **Binds the new certificate** as the ADFS Service Communications certificate and SSL certificate.
 10. **Restarts the ADFS service** and waits up to 60 seconds to confirm it comes back up.
 
@@ -316,7 +316,7 @@ How `HostName`, `Identifier`, and CORS origins are resolved depends on whether `
 | `HostName` | Set directly to the provided FQDN |
 | `Identifier` | Existing URI host component replaced with the provided FQDN; scheme, path, and query preserved |
 | `DisplayName` | Plain suffix swap (human-readable text) |
-| CORS origins | Resolved from cert SANs: ADFS host + admin, DVR, device, explorer app hosts + any `-CorsExtraOrigins`; operator confirms before applying |
+| CORS origins | ADFS host + app hosts resolved from cert SANs (by service label) and native app redirect URIs (wildcard-cert fallback) + any `-CorsExtraOrigins`; applied as a single string array in one call |
 
 **Heuristic mode** (no `-TargetAdfsHostname`, cert has explicit SANs):
 
