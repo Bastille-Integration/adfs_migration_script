@@ -1310,8 +1310,10 @@ function Update-CorsTrustedOrigins {
     }
 
     try {
-        Write-Host "Writing $($combined.Count) CORS trusted origin(s) to ADFS..." -ForegroundColor Cyan
-        Set-AdfsResponseHeaders -CORSTrustedOrigins ($combined.ToArray() -join ',') -ErrorAction Stop
+        $originsArray = [string[]]($combined.ToArray())
+        Write-Host "Writing $($originsArray.Count) CORS trusted origin(s) to ADFS..." -ForegroundColor Cyan
+        $originsArray | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkCyan }
+        Set-AdfsResponseHeaders -EnableCORS $true -CORSTrustedOrigins $originsArray -ErrorAction Stop
         Write-Host "CORS updated successfully." -ForegroundColor Green
     }
     catch {
