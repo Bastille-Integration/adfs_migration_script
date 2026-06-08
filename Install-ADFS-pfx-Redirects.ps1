@@ -1299,7 +1299,7 @@ function Update-CorsTrustedOrigins {
     }
 
     try {
-        Set-AdfsResponseHeaders -CORSTrustedOrigins ($combined.ToArray() -join ',') -ErrorAction Stop
+        Set-AdfsResponseHeaders -CORSTrustedOrigins ([string[]]$combined) -ErrorAction Stop
         Write-Host "CORS updated successfully." -ForegroundColor Green
     }
     catch {
