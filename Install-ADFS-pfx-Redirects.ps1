@@ -1193,8 +1193,11 @@ function Update-CorsTrustedOrigins {
 
     $existing = @()
     if ($null -ne $headers.CORSTrustedOrigins) {
+        # Normalize: ADFS may return a [string[]] array, a comma-delimited string,
+        # or a space-delimited string depending on how origins were previously written.
         $existing = @(
-            ($headers.CORSTrustedOrigins -join ',') -split ',' |
+            @($headers.CORSTrustedOrigins) |
+            ForEach-Object { $_ -split '[\s,]+' } |
             ForEach-Object { $_.Trim() } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         )
@@ -1204,10 +1207,35 @@ function Update-CorsTrustedOrigins {
     $combined = New-Object 'System.Collections.Generic.List[string]'
 
     if ($ProposedOrigins.Count -gt 0) {
-        # Pre-built list from Resolve-AppCorsOrigins — use directly
+        # Start with the freshly-resolved proposed list.
         foreach ($origin in $ProposedOrigins) {
             if (-not [string]::IsNullOrWhiteSpace($origin) -and $set.Add($origin)) {
                 [void]$combined.Add($origin)
+            }
+        }
+
+        # Preserve any existing origins that are NOT on the old suffix and were
+        # not already covered by the proposed list (e.g. entries that discovery
+        # missed because native-app redirect URIs were absent or incomplete).
+        foreach ($origin in $existing) {
+            if ([string]::IsNullOrWhiteSpace($origin)) { continue }
+            $normalized = Convert-ToCorsOrigin -UriString $origin
+            if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+
+            if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
+                $parsedCheck = $null
+                if ([System.Uri]::TryCreate($origin, [System.UriKind]::Absolute, [ref]$parsedCheck)) {
+                    $hostCheck = $parsedCheck.Host.ToLowerInvariant()
+                    $oldSuffixNorm = $OldSuffix.Trim().ToLowerInvariant()
+                    if ($hostCheck -eq $oldSuffixNorm -or $hostCheck.EndsWith('.' + $oldSuffixNorm)) {
+                        continue  # on old suffix — let proposed list replace it
+                    }
+                }
+            }
+
+            if ($set.Add($normalized)) {
+                [void]$combined.Add($normalized)
+                Write-Host "  Preserved existing origin: $normalized" -ForegroundColor DarkGray
             }
         }
     }
