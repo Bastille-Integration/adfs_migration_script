@@ -1097,9 +1097,15 @@ function Resolve-AppCorsOrigins {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $result = New-Object 'System.Collections.Generic.List[string]'
 
+    Write-Host ""
+    Write-Host "Resolving CORS trusted origins..." -ForegroundColor Cyan
+
     if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
         $origin = "https://" + $TargetAdfsHostname.Trim().ToLowerInvariant()
-        if ($set.Add($origin)) { [void]$result.Add($origin) }
+        if ($set.Add($origin)) {
+            [void]$result.Add($origin)
+            Write-Host "  + $origin  [ADFS hostname]" -ForegroundColor DarkCyan
+        }
     }
 
     # Try cert SANs first (host-specific certs with explicit app SANs)
@@ -1108,7 +1114,10 @@ function Resolve-AppCorsOrigins {
             $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
             if (@($firstLabel -split '-') -contains $label) {
                 $origin = "https://$san"
-                if ($set.Add($origin)) { [void]$result.Add($origin) }
+                if ($set.Add($origin)) {
+                    [void]$result.Add($origin)
+                    Write-Host "  + $origin  [cert SAN label: $label]" -ForegroundColor DarkCyan
+                }
                 break
             }
         }
@@ -1139,6 +1148,7 @@ function Resolve-AppCorsOrigins {
                     $normalized = Convert-ToCorsOrigin -UriString $newUri
                     if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
                         [void]$result.Add($normalized)
+                        Write-Host "  + $normalized  [redirect URI: $($app.Name)]" -ForegroundColor DarkCyan
                     }
                 }
             }
@@ -1152,6 +1162,7 @@ function Resolve-AppCorsOrigins {
         $normalized = Convert-ToCorsOrigin -UriString $origin
         if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
             [void]$result.Add($normalized)
+            Write-Host "  + $normalized  [extra origin]" -ForegroundColor DarkCyan
         }
     }
 
@@ -1299,6 +1310,7 @@ function Update-CorsTrustedOrigins {
     }
 
     try {
+        Write-Host "Writing $($combined.Count) CORS trusted origin(s) to ADFS..." -ForegroundColor Cyan
         Set-AdfsResponseHeaders -CORSTrustedOrigins ($combined.ToArray() -join ',') -ErrorAction Stop
         Write-Host "CORS updated successfully." -ForegroundColor Green
     }
