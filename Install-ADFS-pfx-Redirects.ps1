@@ -1332,8 +1332,62 @@ function Update-CorsTrustedOrigins {
         return
     }
 
-    if (-not (Confirm-Action "Replace CORS trusted origins with this list? (y/n)")) {
-        Write-Host "Skipped CORS update." -ForegroundColor Yellow
+    if (-not $NonInteractive) {
+        $applyList = $false
+        while (-not $applyList) {
+            Write-Host ""
+            Write-Host "CORS Trusted Origins to apply:" -ForegroundColor Cyan
+            for ($i = 0; $i -lt $combined.Count; $i++) {
+                Write-Host ("  [{0}] {1}" -f ($i + 1), $combined[$i])
+            }
+            Write-Host ""
+            Write-Host "  y          apply this list" -ForegroundColor Gray
+            Write-Host "  n          skip CORS update" -ForegroundColor Gray
+            Write-Host "  add <url>  add an origin to the list" -ForegroundColor Gray
+            Write-Host "  rm <n>     remove entry by number" -ForegroundColor Gray
+            $response = (Read-Host "Action").Trim()
+
+            if ($response -eq 'y') {
+                $applyList = $true
+            }
+            elseif ($response -eq 'n') {
+                Write-Host "Skipped CORS update." -ForegroundColor Yellow
+                return
+            }
+            elseif ($response -match '^add\s+(.+)$') {
+                $newUrl = $Matches[1].Trim()
+                $normalized = Convert-ToCorsOrigin -UriString $newUrl
+                if ([string]::IsNullOrWhiteSpace($normalized)) {
+                    Write-Host "  Invalid URL — must be an absolute URI (e.g. https://host.example.com)." -ForegroundColor Red
+                }
+                elseif ($set.Add($normalized)) {
+                    [void]$combined.Add($normalized)
+                    Write-Host "  Added: $normalized" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  Already in list: $normalized" -ForegroundColor Yellow
+                }
+            }
+            elseif ($response -match '^rm\s+(\d+)$') {
+                $idx = [int]$Matches[1] - 1
+                if ($idx -ge 0 -and $idx -lt $combined.Count) {
+                    $removed = $combined[$idx]
+                    $combined.RemoveAt($idx)
+                    [void]$set.Remove($removed)
+                    Write-Host "  Removed: $removed" -ForegroundColor Yellow
+                }
+                else {
+                    Write-Host "  Invalid number. Enter a value between 1 and $($combined.Count)." -ForegroundColor Red
+                }
+            }
+            else {
+                Write-Host "  Unrecognized input. Use: y, n, add <url>, rm <n>" -ForegroundColor Red
+            }
+        }
+    }
+
+    if ($combined.Count -eq 0) {
+        Write-Host "No origins remaining — CORS update skipped." -ForegroundColor Yellow
         return
     }
 
