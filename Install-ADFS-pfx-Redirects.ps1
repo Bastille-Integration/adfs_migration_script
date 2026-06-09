@@ -1142,8 +1142,11 @@ function Resolve-AppCorsOrigins {
         }
     }
 
-    # Try cert SANs first (host-specific certs with explicit app SANs)
-    foreach ($label in @('admin', 'dvr', 'device', 'explorer')) {
+    # Try cert SANs first (host-specific certs with explicit app SANs). The label
+    # list covers the Bastille browser apps that need a CORS origin. 'wti' and
+    # 'wtiapi' are distinct hyphen segments, so each matches only its own host
+    # (wids-wti-* vs wids-wtiapi-*).
+    foreach ($label in @('admin', 'dvr', 'device', 'explorer', 'lighthouse', 'wtiapi', 'wti')) {
         foreach ($san in ($SanNames | Where-Object { -not $_.StartsWith('*.') })) {
             $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
             if (@($firstLabel -split '-') -contains $label) {
