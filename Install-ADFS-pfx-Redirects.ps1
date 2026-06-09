@@ -1211,7 +1211,10 @@ function Resolve-AppCorsOrigins {
         }
     }
 
-    return ,$result.ToArray()
+    # Return a flat array (no leading comma). The caller wraps this in @(), and a
+    # comma-wrapped return would nest as Object[1] -> when bound to the [string[]]
+    # ProposedOrigins parameter it collapses to a single space-joined string.
+    return $result.ToArray()
 }
 
 function Update-CorsTrustedOrigins {
