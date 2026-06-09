@@ -300,7 +300,7 @@ admin.olddomain.com  →  admin.newdomain.com
 ```
 
 **SAN label matching** (host-specific cert):
-When the certificate contains explicit hostnames rather than a wildcard, the script collapses all subdomain labels above the old suffix into a single hyphen-joined service label, then finds the certificate SAN whose first label contains that service name as a hyphen-delimited segment.
+When the certificate contains explicit hostnames rather than a wildcard, the script collapses all subdomain labels above the old suffix into a single hyphen-joined service label, then matches a certificate SAN whose first label **either equals that service label exactly or contains it as a hyphen-delimited segment** (exact matches win). The exact-match path handles two important cases: a host that already uses the target naming (`wids-admin-abl15` → `wids-admin-abl15`, e.g. a cert rotation or domain-only change), and a multi-label host that collapses to a flat SAN (`wids-auth.adfs-abl15` → `wids-auth-adfs-abl15`). The segment path handles short service names (`admin` → `wids-admin-abl15`).
 
 The label collapse handles multi-level old hostnames correctly. For example, `wids-auth.adfs-abl17.olddomain.com` with an old suffix of `olddomain.com` produces the service label `wids-auth-adfs-abl17`, which then matches the flat SAN `wids-auth-adfs-abl17.newdomain.com`.
 
@@ -315,7 +315,7 @@ Example — cert SANs: `wids-admin-site01.newdomain.com`, `wids-dvr-site01.newdo
 | `wtiapi.olddomain.com` | `wtiapi` | `wids-wtiapi-site01.newdomain.com` |
 | `wids-auth.adfs-abl17.olddomain.com` | `wids-auth-adfs-abl17` | `wids-auth-adfs-abl17.newdomain.com` |
 
-URI paths and ports are preserved in both cases. If no SAN match is found for a hostname, that URI is skipped with a warning rather than silently dropped.
+URI paths and ports are preserved in both cases. If no SAN match is found for a hostname — for example an old host whose site code differs from every SAN (`…-abl14` when the cert only covers `…-abl15`) — that URI is skipped with a warning rather than silently dropped, since no correct target exists in the certificate.
 
 ### Federation Service Properties and CORS: Explicit vs. Heuristic Mode
 

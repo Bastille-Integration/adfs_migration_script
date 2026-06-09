@@ -680,13 +680,21 @@ function Replace-HostUsingSans {
         $sanFirstLabel = ($san -split '\.')[0].ToLowerInvariant()
         $sanSegments = @($sanFirstLabel -split '-')
 
-        if ($sanSegments -contains $serviceLabel) {
-            # Prefer the match whose first label is shortest (most specific/direct match)
+        $score = -1
+        if ($sanFirstLabel -eq $serviceLabel) {
+            # Exact first-label match - handles a compound host that already uses the
+            # target naming (wids-admin-abl15 -> wids-admin-abl15) and a collapsed
+            # multi-label host (wids-auth.adfs-abl15 -> wids-auth-adfs-abl15). Strongest.
+            $score = 2000
+        }
+        elseif ($sanSegments -contains $serviceLabel) {
+            # Service token appears as a hyphen segment (admin -> wids-admin-abl15).
+            # Prefer the match whose first label is shortest (most specific/direct match).
             $score = 1000 - $sanFirstLabel.Length
-            if ($score -gt $bestScore) {
-                $bestScore = $score
-                $newHost = $san
-            }
+        }
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $newHost = $san
         }
     }
 
@@ -746,12 +754,19 @@ function Resolve-HostnameFromSans {
     foreach ($san in $SanNames) {
         $sanFirstLabel = ($san -split '\.')[0].ToLowerInvariant()
         $sanSegments = @($sanFirstLabel -split '-')
-        if ($sanSegments -contains $serviceLabel) {
+        $score = -1
+        if ($sanFirstLabel -eq $serviceLabel) {
+            # Exact first-label match - compound host already on the target naming
+            # (wids-admin-abl15) or a collapsed multi-label host (wids-auth.adfs-abl15
+            # -> wids-auth-adfs-abl15). Strongest.
+            $score = 2000
+        }
+        elseif ($sanSegments -contains $serviceLabel) {
             $score = 1000 - $sanFirstLabel.Length
-            if ($score -gt $bestScore) {
-                $bestScore = $score
-                $bestMatch = $san
-            }
+        }
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $bestMatch = $san
         }
     }
 
@@ -1123,7 +1138,7 @@ function Resolve-AppCorsOrigins {
         }
     }
 
-    # Supplement from native app redirect URIs — covers wildcard-cert deployments
+    # Supplement from native app redirect URIs - covers wildcard-cert deployments
     # where app hostnames do not appear individually in the cert SANs.
     # Redirect URIs are already on the new suffix (updated earlier in the script),
     # so migration is a no-op for already-current URIs and corrects any that were
@@ -1228,7 +1243,7 @@ function Update-CorsTrustedOrigins {
                     $hostCheck = $parsedCheck.Host.ToLowerInvariant()
                     $oldSuffixNorm = $OldSuffix.Trim().ToLowerInvariant()
                     if ($hostCheck -eq $oldSuffixNorm -or $hostCheck.EndsWith('.' + $oldSuffixNorm)) {
-                        continue  # on old suffix — let proposed list replace it
+                        continue  # on old suffix - let proposed list replace it
                     }
                 }
             }
@@ -1358,7 +1373,7 @@ function Update-CorsTrustedOrigins {
                 $newUrl = $Matches[1].Trim()
                 $normalized = Convert-ToCorsOrigin -UriString $newUrl
                 if ([string]::IsNullOrWhiteSpace($normalized)) {
-                    Write-Host "  Invalid URL — must be an absolute URI (e.g. https://host.example.com)." -ForegroundColor Red
+                    Write-Host "  Invalid URL - must be an absolute URI (e.g. https://host.example.com)." -ForegroundColor Red
                 }
                 elseif ($set.Add($normalized)) {
                     [void]$combined.Add($normalized)
@@ -1387,7 +1402,7 @@ function Update-CorsTrustedOrigins {
     }
 
     if ($combined.Count -eq 0) {
-        Write-Host "No origins remaining — CORS update skipped." -ForegroundColor Yellow
+        Write-Host "No origins remaining - CORS update skipped." -ForegroundColor Yellow
         return
     }
 
