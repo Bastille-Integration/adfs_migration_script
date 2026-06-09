@@ -5,7 +5,7 @@
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -PfxPassword (Read-Host "PFX Password" -AsSecureString)
 # Optional overrides:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -OldHostSuffix "bn.nga.mil" -NewHostSuffix "rta.fak"
-#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "wids-auth-adfs-abl17.ophysicalsecurity.com"
+#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "wids-auth-adfs-abl17.newdomain.com"
 
 [CmdletBinding()]
 param(
@@ -18,7 +18,7 @@ param(
 
     [string]$NewHostSuffix,
 
-    # The desired FQDN for the ADFS service (e.g. "wids-auth-adfs-abl17.ophysicalsecurity.com").
+    # The desired FQDN for the ADFS service (e.g. "wids-auth-adfs-abl17.newdomain.com").
     # If not supplied the script will prompt interactively. This value is used directly for
     # the Federation Service HostName, Identifier, and CORS origin rather than being derived
     # from heuristics, so it must be an exact hostname that exists in the certificate SANs.
@@ -108,7 +108,7 @@ function Get-TargetAdfsHostname {
 
     $hostname = $null
     while ([string]::IsNullOrWhiteSpace($hostname)) {
-        $raw = Read-Host "Target ADFS hostname (e.g. wids-auth-adfs-abl17.ophysicalsecurity.com)"
+        $raw = Read-Host "Target ADFS hostname (e.g. wids-auth-adfs-abl17.newdomain.com)"
         $raw = $raw.Trim().ToLowerInvariant()
 
         if ([string]::IsNullOrWhiteSpace($raw)) {
