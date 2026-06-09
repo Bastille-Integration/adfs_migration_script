@@ -661,9 +661,10 @@ function Replace-HostUsingSans {
         }
     }
 
-    # Collapse all subdomain labels above OldSuffix into a single hyphenated service label
-    # so that e.g. wids-auth.adfs-abl17.ophysicalsecurity.com produces "wids-auth-adfs-abl17"
-    # and correctly matches the flat SAN wids-auth-adfs-abl17.ophysicalsecurity.com.
+    # Capture the labels above OldSuffix as both a dotted prefix (preserves the
+    # original structure, e.g. wids-auth.adfs-abl15) and a hyphen-collapsed service
+    # label (for segment/flat-SAN fallback matching). The matcher below prefers a
+    # SAN that keeps the dotted prefix, so multi-label hosts are not flattened.
     $hostParts   = $oldHost -split '\.'
     $domainDepth = if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
                        ($OldSuffix.Trim().ToLowerInvariant() -split '\.').Count
@@ -672,19 +673,28 @@ function Replace-HostUsingSans {
                        $hostParts[0..($hostParts.Count - $domainDepth - 1)]
                    } else { @($hostParts[0]) }
     $serviceLabel = $subParts -join '-'
+    # Dotted prefix preserves the original multi-label structure so the ADFS host
+    # wids-auth.adfs-abl15 keeps its dot instead of collapsing to wids-auth-adfs-abl15.
+    $oldPrefix = ($subParts -join '.').ToLowerInvariant()
 
     $newHost = $null
     $bestScore = -1
 
     foreach ($san in $SanNames) {
-        $sanFirstLabel = ($san -split '\.')[0].ToLowerInvariant()
+        $sanHost = $san.ToLowerInvariant()
+        $sanFirstLabel = ($sanHost -split '\.')[0]
         $sanSegments = @($sanFirstLabel -split '-')
 
         $score = -1
-        if ($sanFirstLabel -eq $serviceLabel) {
-            # Exact first-label match - handles a compound host that already uses the
-            # target naming (wids-admin-abl15 -> wids-admin-abl15) and a collapsed
-            # multi-label host (wids-auth.adfs-abl15 -> wids-auth-adfs-abl15). Strongest.
+        if ($sanHost.StartsWith($oldPrefix + '.')) {
+            # Structure-preserving: the SAN keeps the exact subdomain prefix and only the
+            # domain suffix changed (wids-auth.adfs-abl15.<old> -> wids-auth.adfs-abl15.<new>).
+            # Strongest, and it leaves the original dotted form intact.
+            $score = 3000
+        }
+        elseif ($sanFirstLabel -eq $serviceLabel) {
+            # Collapsed label equals a flat SAN first label (wids-auth-adfs-abl15);
+            # only used when the cert has no structure-preserving SAN.
             $score = 2000
         }
         elseif ($sanSegments -contains $serviceLabel) {
@@ -736,9 +746,10 @@ function Resolve-HostnameFromSans {
         }
     }
 
-    # Collapse all subdomain labels above OldSuffix into a single hyphenated service label
-    # so that e.g. wids-auth.adfs-abl17.ophysicalsecurity.com produces "wids-auth-adfs-abl17"
-    # and correctly matches the flat SAN wids-auth-adfs-abl17.ophysicalsecurity.com.
+    # Capture the labels above OldSuffix as both a dotted prefix (preserves the
+    # original structure, e.g. wids-auth.adfs-abl15) and a hyphen-collapsed service
+    # label (for segment/flat-SAN fallback matching). The matcher below prefers a
+    # SAN that keeps the dotted prefix, so multi-label hosts are not flattened.
     $hostParts   = $oldHost -split '\.'
     $domainDepth = if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
                        ($OldSuffix.Trim().ToLowerInvariant() -split '\.').Count
@@ -747,18 +758,26 @@ function Resolve-HostnameFromSans {
                        $hostParts[0..($hostParts.Count - $domainDepth - 1)]
                    } else { @($hostParts[0]) }
     $serviceLabel = $subParts -join '-'
+    # Dotted prefix preserves the original multi-label structure (wids-auth.adfs-abl15
+    # stays dotted rather than collapsing to wids-auth-adfs-abl15).
+    $oldPrefix = ($subParts -join '.').ToLowerInvariant()
 
     $bestMatch = $null
     $bestScore = -1
 
     foreach ($san in $SanNames) {
-        $sanFirstLabel = ($san -split '\.')[0].ToLowerInvariant()
+        $sanHost = $san.ToLowerInvariant()
+        $sanFirstLabel = ($sanHost -split '\.')[0]
         $sanSegments = @($sanFirstLabel -split '-')
         $score = -1
-        if ($sanFirstLabel -eq $serviceLabel) {
-            # Exact first-label match - compound host already on the target naming
-            # (wids-admin-abl15) or a collapsed multi-label host (wids-auth.adfs-abl15
-            # -> wids-auth-adfs-abl15). Strongest.
+        if ($sanHost.StartsWith($oldPrefix + '.')) {
+            # Structure-preserving: SAN keeps the exact subdomain prefix, only the domain
+            # changed (wids-auth.adfs-abl15.<old> -> wids-auth.adfs-abl15.<new>). Strongest.
+            $score = 3000
+        }
+        elseif ($sanFirstLabel -eq $serviceLabel) {
+            # Collapsed label equals a flat SAN first label (wids-auth-adfs-abl15);
+            # only used when the cert has no structure-preserving SAN.
             $score = 2000
         }
         elseif ($sanSegments -contains $serviceLabel) {

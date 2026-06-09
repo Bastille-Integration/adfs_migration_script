@@ -300,20 +300,21 @@ admin.olddomain.com  →  admin.newdomain.com
 ```
 
 **SAN label matching** (host-specific cert):
-When the certificate contains explicit hostnames rather than a wildcard, the script collapses all subdomain labels above the old suffix into a single hyphen-joined service label, then matches a certificate SAN whose first label **either equals that service label exactly or contains it as a hyphen-delimited segment** (exact matches win). The exact-match path handles two important cases: a host that already uses the target naming (`wids-admin-abl15` → `wids-admin-abl15`, e.g. a cert rotation or domain-only change), and a multi-label host that collapses to a flat SAN (`wids-auth.adfs-abl15` → `wids-auth-adfs-abl15`). The segment path handles short service names (`admin` → `wids-admin-abl15`).
+When the certificate contains explicit hostnames rather than a wildcard, the script takes the old hostname's labels above the old suffix and matches a certificate SAN in priority order:
 
-The label collapse handles multi-level old hostnames correctly. For example, `wids-auth.adfs-abl17.olddomain.com` with an old suffix of `olddomain.com` produces the service label `wids-auth-adfs-abl17`, which then matches the flat SAN `wids-auth-adfs-abl17.newdomain.com`.
+1. **Structure-preserving (preferred):** a SAN that keeps the **exact subdomain prefix**, with only the domain suffix changed. The original form — including any dots — is preserved. This handles the ADFS host `wids-auth.adfs-abl15.<old>` → `wids-auth.adfs-abl15.<new>` (the dot stays a dot), and a host already on the target naming `wids-admin-abl15.<old>` → `wids-admin-abl15.<new>` (cert rotation / domain-only change).
+2. **Flat exact match:** the prefix collapsed to a single hyphen-joined label equals a SAN's first label (`wids-auth.adfs-abl15` → flat SAN `wids-auth-adfs-abl15`). Only used when no structure-preserving SAN exists.
+3. **Segment match:** the collapsed label appears as a hyphen-delimited segment of a SAN's first label — for short service names (`admin` → `wids-admin-abl15`). The shortest matching first label wins.
 
-Example — cert SANs: `wids-admin-site01.newdomain.com`, `wids-dvr-site01.newdomain.com`, `wids-auth-adfs-site01.newdomain.com` ...
+Example — cert SANs: `wids-admin-site01.newdomain.com`, `wids-dvr-site01.newdomain.com`, `wids-auth.adfs-site01.newdomain.com` ...
 
-| Old hostname | Service label | Matched SAN |
+| Old hostname | Matched via | Matched SAN |
 |---|---|---|
-| `admin.olddomain.com` | `admin` | `wids-admin-site01.newdomain.com` |
-| `dvr.olddomain.com` | `dvr` | `wids-dvr-site01.newdomain.com` |
-| `device.olddomain.com` | `device` | `wids-device-site01.newdomain.com` |
-| `explorer.olddomain.com` | `explorer` | `wids-explorer-site01.newdomain.com` |
-| `wtiapi.olddomain.com` | `wtiapi` | `wids-wtiapi-site01.newdomain.com` |
-| `wids-auth.adfs-abl17.olddomain.com` | `wids-auth-adfs-abl17` | `wids-auth-adfs-abl17.newdomain.com` |
+| `admin.olddomain.com` | segment (`admin`) | `wids-admin-site01.newdomain.com` |
+| `dvr.olddomain.com` | segment (`dvr`) | `wids-dvr-site01.newdomain.com` |
+| `device.olddomain.com` | segment (`device`) | `wids-device-site01.newdomain.com` |
+| `wids-admin-site01.olddomain.com` | structure-preserving | `wids-admin-site01.newdomain.com` |
+| `wids-auth.adfs-site01.olddomain.com` | structure-preserving (dot kept) | `wids-auth.adfs-site01.newdomain.com` |
 
 URI paths and ports are preserved in both cases. If no SAN match is found for a hostname — for example an old host whose site code differs from every SAN (`…-abl14` when the cert only covers `…-abl15`) — that URI is skipped with a warning rather than silently dropped, since no correct target exists in the certificate.
 
