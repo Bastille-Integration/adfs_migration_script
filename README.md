@@ -285,7 +285,7 @@ The script performs the following steps in order:
 5. **Prompts for (or accepts) the target ADFS hostname** — the FQDN the Federation Service will use after migration. Validated against the certificate SANs. Supply via `-TargetAdfsHostname` to skip the prompt.
 6. **Updates redirect URIs** on all ADFS native client applications.
 7. **Updates Federation Service Properties** (DisplayName, HostName, Identifier).
-8. **Resolves and confirms CORS Trusted Origins** — builds the full origin list from two sources: (1) cert SANs, matched by service label (`admin`, `dvr`, `device`, `explorer`) for host-specific certs; (2) the redirect URIs of all registered native apps, which covers wildcard-cert deployments where app hostnames do not appear individually in the cert. The ADFS hostname is always first. Any `-CorsExtraOrigins` are appended, duplicates are removed, the complete list is shown, and the operator confirms before it is applied as a single atomic update.
+8. **Resolves, lets you edit, and applies CORS Trusted Origins** — builds the full origin list from three sources: (1) the **existing** ADFS CORS trusted origins that are still valid (preserved, not discarded); (2) cert SANs, matched by service label (`admin`, `dvr`, `device`, `explorer`) for host-specific certs; (3) the redirect URIs of all registered native apps, which covers wildcard-cert deployments where app hostnames do not appear individually in the cert. The ADFS hostname is always first; any `-CorsExtraOrigins` are appended; duplicates are removed. The combined list is then shown in an **interactive editor** (unless `-NonInteractive`) where you can `add <url>`, `rm <n>`, apply (`y`), or skip (`n`). On apply it is written as a single string array via `Set-AdfsResponseHeaders -EnableCORS $true` in one call.
 9. **Binds the new certificate** as the ADFS Service Communications certificate and SSL certificate.
 10. **Restarts the ADFS service** and waits up to 60 seconds to confirm it comes back up.
 
@@ -328,7 +328,7 @@ How `HostName`, `Identifier`, and CORS origins are resolved depends on whether `
 | `HostName` | Set directly to the provided FQDN |
 | `Identifier` | Existing URI host component replaced with the provided FQDN; scheme, path, and query preserved |
 | `DisplayName` | Plain suffix swap (human-readable text) |
-| CORS origins | ADFS host + app hosts resolved from cert SANs (by service label) and native app redirect URIs (wildcard-cert fallback) + any `-CorsExtraOrigins`; applied as a single string array in one call |
+| CORS origins | Preserved existing valid origins + ADFS host + app hosts resolved from cert SANs (by service label) and native app redirect URIs (wildcard-cert fallback) + any `-CorsExtraOrigins`; shown in an interactive editor (`add`/`rm`/`y`/`n`), then applied as a single string array in one call |
 
 **Heuristic mode** (no `-TargetAdfsHostname`, cert has explicit SANs):
 
@@ -337,7 +337,7 @@ How `HostName`, `Identifier`, and CORS origins are resolved depends on whether `
 | `HostName` | SAN label matching — must resolve to a hostname present in the cert |
 | `Identifier` | SAN label matching on the URI host component; path is preserved |
 | `DisplayName` | Plain suffix swap |
-| CORS origins | Each existing origin migrated via SAN label matching; operator confirms before applying |
+| CORS origins | Existing valid origins preserved + each migrated via SAN label matching; shown in the interactive editor (`add`/`rm`/`y`/`n`) before applying |
 
 Explicit hostname mode is preferred when the ADFS service hostname is known — it is unambiguous and does not depend on heuristic matching.
 
@@ -511,6 +511,7 @@ Reads the existing ADFS CORS trusted origins and extracts the domain suffix from
 ## Important Notes
 
 - **The redirect URI set is replaced, not merged.** Each native app's redirect URIs are set to exactly the migrated list. Any existing URI that does not match the old suffix is not carried over. Review current registrations before running.
+- **CORS origins, by contrast, are preserved and editable.** Existing valid trusted origins are kept and merged with the migrated/resolved set; the combined list is shown in an interactive editor (`add <url>`, `rm <n>`, `y` to apply, `n` to skip) before being written. Under `-NonInteractive` the merged list is applied without the editor.
 - **Run on every ADFS node.** Certificate binding (`Set-AdfsCertificate`, `Set-AdfsSslCertificate`) must be applied on each node in the farm; the ADFS configuration changes (redirect URIs, CORS, properties) only need to run once.
 - **ADFS service restart is always performed** at the end of the script. Plan for a brief service interruption.
 - The script requires PowerShell to be running as Administrator. It will exit immediately if the privilege check fails.
