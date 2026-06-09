@@ -499,7 +499,7 @@ A common cause of `Set-AdfsSslCertificate` appearing to succeed but the old cert
 
 ### New host suffix
 
-1. Checks for a wildcard SAN (e.g. `*.newdomain.com` → `newdomain.com`).
+1. Checks for a wildcard SAN (e.g. `*.newdomain.com` → `newdomain.com`). If the cert has **several wildcards** (e.g. `*.newdomain.com` and `*.adfs.newdomain.com`), the **shortest (base) domain wins** — so app hosts migrate to `app.newdomain.com`, not `app.adfs.newdomain.com`. The deeper `*.adfs.*` level is used for the ADFS host via `-TargetAdfsHostname`.
 2. If no wildcard exists, finds the longest domain suffix shared by **all** SANs (e.g. every explicit SAN ends in `.newdomain.com`).
 3. Fails with an error if neither approach yields a result — provide `-NewHostSuffix` explicitly.
 

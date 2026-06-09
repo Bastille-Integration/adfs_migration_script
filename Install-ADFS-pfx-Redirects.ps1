@@ -238,19 +238,24 @@ function Get-NewHostSuffixFromCertificateWildcardSan {
 
     $dnsNames = @(Get-CertificateDnsNames -Cert $Cert)
 
+    $wildcardSuffixes = @()
     foreach ($name in $dnsNames) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-
         $trimmed = $name.Trim().ToLowerInvariant()
         if ($trimmed.StartsWith('*.')) {
             $suffix = $trimmed.Substring(2)
-            if (-not [string]::IsNullOrWhiteSpace($suffix)) {
-                return $suffix
-            }
+            if (-not [string]::IsNullOrWhiteSpace($suffix)) { $wildcardSuffixes += $suffix }
         }
     }
+    if ($wildcardSuffixes.Count -eq 0) { return $null }
 
-    return $null
+    # A cert may carry several wildcards (e.g. *.bn-wids.internal AND
+    # *.adfs.bn-wids.internal). The app-host domain is the base registrable
+    # domain, so prefer the SHORTEST wildcard suffix (fewest labels). Otherwise a
+    # deeper wildcard like *.adfs.<domain> would hijack the suffix and rewrite
+    # admin.<old> as admin.adfs.<new>. The ADFS host is set separately via
+    # -TargetAdfsHostname, so it does not need the deeper wildcard here.
+    return ($wildcardSuffixes | Sort-Object @{ Expression = { ($_ -split '\.').Count } }, @{ Expression = { $_.Length } } | Select-Object -First 1)
 }
 
 function Get-SubjectCommonName {
@@ -710,11 +715,13 @@ function Replace-HostUsingSans {
 
     if ([string]::IsNullOrWhiteSpace($newHost)) {
         # Wildcard fallback: old-suffix filter above already confirmed this host should be
-        # migrated; pair the original service label with the wildcard's domain.
-        foreach ($san in $SanNames) {
-            if (-not $san.StartsWith('*.')) { continue }
-            $newHost = $serviceLabel + '.' + $san.Substring(2)
-            break
+        # migrated; pair the original service label with the wildcard's domain. Prefer the
+        # SHORTEST wildcard (base domain) so a deeper *.adfs.<domain> does not splice an
+        # extra label into app hosts (admin.<old> -> admin.adfs.<new>).
+        $wild = @($SanNames | Where-Object { $_.StartsWith('*.') } |
+            Sort-Object @{ Expression = { ($_ -split '\.').Count } }, @{ Expression = { $_.Length } })
+        if ($wild.Count -gt 0) {
+            $newHost = $serviceLabel + '.' + $wild[0].Substring(2)
         }
     }
 
@@ -791,11 +798,12 @@ function Resolve-HostnameFromSans {
 
     if ([string]::IsNullOrWhiteSpace($bestMatch)) {
         # Wildcard fallback: old-suffix filter above already confirmed this host should be
-        # migrated; pair the original service label with the wildcard's domain.
-        foreach ($san in $SanNames) {
-            if (-not $san.StartsWith('*.')) { continue }
-            $bestMatch = $serviceLabel + '.' + $san.Substring(2)
-            break
+        # migrated; pair the original service label with the wildcard's domain. Prefer the
+        # SHORTEST wildcard (base domain) so a deeper *.adfs.<domain> does not add a label.
+        $wild = @($SanNames | Where-Object { $_.StartsWith('*.') } |
+            Sort-Object @{ Expression = { ($_ -split '\.').Count } }, @{ Expression = { $_.Length } })
+        if ($wild.Count -gt 0) {
+            $bestMatch = $serviceLabel + '.' + $wild[0].Substring(2)
         }
     }
 
