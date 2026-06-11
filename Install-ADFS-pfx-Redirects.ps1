@@ -7,10 +7,17 @@
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -OldHostSuffix "bn.nga.mil" -NewHostSuffix "rta.fak"
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "wids-auth-adfs-abl17.newdomain.com"
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "auth-home.adfs.bn-wids.internal" -Site "home"
+#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -EnableUpdatePassword -TokenCertificateDuration 1825
+#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -Version   (or -v)  -> print version and exit
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
-    [Parameter(Mandatory = $true)]
+    # Print the script version and exit. (-v is an alias.)
+    [Parameter(ParameterSetName = 'Version')]
+    [Alias('v')]
+    [switch]$Version,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Run')]
     [string]$PfxPath,
 
     [SecureString]$PfxPassword,
@@ -46,8 +53,20 @@ param(
 
     [switch]$SkipFederationServiceProperties,
 
+    # Enable the ADFS update-password portal endpoint (/adfs/portal/updatepassword/).
+    [switch]$EnableUpdatePassword,
+
+    # Set the token-signing/decryption certificate duration (days). 0 = leave unchanged.
+    [int]$TokenCertificateDuration = 0,
+
+    # Immediately roll over (regenerate) the token-signing/decryption certificates.
+    # DISRUPTIVE: relying parties must re-consume metadata afterward. Opt-in only.
+    [switch]$RolloverTokenCerts,
+
     [switch]$NonInteractive
 )
+
+$ScriptVersion = '2.3'
 
 function Stop-Script {
     param([string]$Message)
@@ -1515,6 +1534,11 @@ function Update-CorsTrustedOrigins {
 }
 
 # --- Main ---
+if ($Version) {
+    Write-Host "Install-ADFS-pfx-Redirects.ps1 version $ScriptVersion"
+    return
+}
+
 if (-not (Test-IsAdmin)) {
     Stop-Script "This script must be run as Administrator."
 }
@@ -1867,6 +1891,46 @@ if (-not $SkipAdfsSsl) {
 else {
     Write-Host ""
     Write-Host "Skipped AD FS SSL update because -SkipAdfsSsl was specified." -ForegroundColor Yellow
+}
+
+# --- Optional ADFS configuration tweaks (token certs, endpoints) ---
+
+if ($TokenCertificateDuration -gt 0) {
+    Write-Host ""
+    Write-Host "Setting token-signing/decryption certificate duration to $TokenCertificateDuration days..." -ForegroundColor Cyan
+    try {
+        $beforeDuration = (Get-AdfsProperties -ErrorAction Stop).CertificateDuration
+        Set-AdfsProperties -CertificateDuration $TokenCertificateDuration -ErrorAction Stop
+        Write-Host "CertificateDuration updated ($beforeDuration -> $TokenCertificateDuration days). Applies to the NEXT generated token certs." -ForegroundColor Green
+    }
+    catch { Write-Host "Failed to set CertificateDuration: $($_.Exception.Message)" -ForegroundColor Red }
+}
+
+if ($RolloverTokenCerts) {
+    Write-Host ""
+    Write-Host "WARNING: -RolloverTokenCerts will regenerate the token-signing/decryption certificates NOW" -ForegroundColor Yellow
+    Write-Host "         and make them primary immediately. Every relying party / application trust must" -ForegroundColor Yellow
+    Write-Host "         re-consume ADFS metadata (or the new token-signing cert) afterward, or logins to" -ForegroundColor Yellow
+    Write-Host "         those apps will fail until they do." -ForegroundColor Yellow
+    $doRoll = $NonInteractive -or (Confirm-Action "Proceed with urgent token-certificate rollover? (y/n)")
+    if ($doRoll) {
+        try {
+            Update-AdfsCertificate -Urgent -ErrorAction Stop
+            Write-Host "Token certificates rolled over." -ForegroundColor Green
+        }
+        catch { Write-Host "Token certificate rollover failed: $($_.Exception.Message)" -ForegroundColor Red }
+    }
+    else { Write-Host "Skipped token-certificate rollover." -ForegroundColor Yellow }
+}
+
+if ($EnableUpdatePassword) {
+    Write-Host ""
+    Write-Host "Enabling the update-password endpoint (/adfs/portal/updatepassword/)..." -ForegroundColor Cyan
+    try {
+        Enable-AdfsEndpoint -TargetAddressPath "/adfs/portal/updatepassword/" -ErrorAction Stop | Out-Null
+        Write-Host "Update-password endpoint enabled." -ForegroundColor Green
+    }
+    catch { Write-Host "Failed to enable update-password endpoint: $($_.Exception.Message)" -ForegroundColor Red }
 }
 
 Write-Host ""

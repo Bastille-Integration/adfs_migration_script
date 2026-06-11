@@ -438,6 +438,10 @@ In addition to migrating each app host (`admin.bn-wids.internal`, `dvr.bn-wids.i
 | `-SkipAdfsSsl` | `switch` | No | Skip binding the new cert as the ADFS SSL certificate. |
 | `-SkipCors` | `switch` | No | Skip updating CORS trusted origins. |
 | `-SkipFederationServiceProperties` | `switch` | No | Skip updating Federation Service Properties (HostName, DisplayName, Identifier). |
+| `-EnableUpdatePassword` | `switch` | No | Enable the ADFS update-password portal endpoint (`/adfs/portal/updatepassword/`) so users can change their own password — pairs with `New-BastilleAdUsers.ps1 -ForcePasswordChange`. |
+| `-TokenCertificateDuration` | `int` | No | Set the token-signing/decryption certificate duration in days via `Set-AdfsProperties -CertificateDuration` (e.g. `1825` = 5 years). Applies to the **next** generated token certs. `0`/omitted = leave unchanged. |
+| `-RolloverTokenCerts` | `switch` | No | **Disruptive, opt-in.** Immediately regenerate the token-signing/decryption certs (`Update-AdfsCertificate -Urgent`) so a new duration takes effect now. Every relying party must re-consume ADFS metadata afterward. Warns and confirms first. |
+| `-Version` / `-v` | `switch` | No | Print the script version and exit (no Administrator or `-PfxPath` needed). |
 | `-NonInteractive` | `switch` | No | Suppress all confirmation prompts. All applicable steps run automatically. Use for scripted deployments. |
 
 ---
