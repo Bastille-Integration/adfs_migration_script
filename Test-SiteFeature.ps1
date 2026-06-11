@@ -80,20 +80,50 @@ function Get-NativeAppMap {
 }
 function Get-NativeApp { param([string]$Id) @(Get-AdfsNativeClientApplication) | Where-Object { $_.Identifier -eq $Id } | Select-Object -First 1 }
 
-# Print the full live state (redirect URIs per app + CORS) under a labelled banner.
+# Print the full relevant ADFS configuration under a labelled banner so each
+# phase (previous / modified / restored) can be validated end to end.
 function Show-State {
     param([string]$Label)
     Write-Host ""
-    Write-Host ("================ " + $Label + " ================") -ForegroundColor Cyan
+    Write-Host ("################################################################" ) -ForegroundColor Cyan
+    Write-Host ("##  " + $Label) -ForegroundColor Cyan
+    Write-Host ("################################################################" ) -ForegroundColor Cyan
+
+    Write-Host "-- Federation Service Properties --" -ForegroundColor White
+    $p = Get-AdfsProperties
+    Write-Host ("   HostName            : " + $p.HostName)
+    Write-Host ("   Identifier          : " + $p.Identifier)
+    Write-Host ("   DisplayName         : " + $p.DisplayName)
+    Write-Host ("   AutoCertRollover    : " + $p.AutoCertificateRollover)
+    Write-Host ("   CertificateDuration : " + $p.CertificateDuration)
+
+    Write-Host "-- Application Groups --" -ForegroundColor White
     foreach ($g in (Get-AdfsApplicationGroup | Sort-Object Name)) {
-        foreach ($a in @(Get-AdfsNativeClientApplication -ApplicationGroup $g -ErrorAction SilentlyContinue)) {
-            Write-Host ("  [{0}] {1}" -f $g.Name, $a.Name) -ForegroundColor Gray
-            @($a.RedirectUri) | Sort-Object | ForEach-Object { Write-Host ("      " + $_) }
+        Write-Host ("   [" + $g.Name + "]") -ForegroundColor Gray
+        foreach ($a in @(Get-AdfsNativeClientApplication -ApplicationGroupIdentifier $g.ApplicationGroupIdentifier -ErrorAction SilentlyContinue)) {
+            Write-Host ("     Native : " + $a.Name + "   (ClientId " + $a.Identifier + ")")
+            @($a.RedirectUri) | Sort-Object | ForEach-Object { Write-Host ("        redirect : " + $_) }
+        }
+        foreach ($w in @(Get-AdfsWebApiApplication -ApplicationGroupIdentifier $g.ApplicationGroupIdentifier -ErrorAction SilentlyContinue)) {
+            Write-Host ("     WebAPI : " + $w.Name + "   (AccessControlPolicy: " + $w.AccessControlPolicyName + ")")
+            @($w.Identifier) | ForEach-Object { Write-Host ("        identifier : " + $_) }
         }
     }
+
+    Write-Host "-- CORS (Response Headers) --" -ForegroundColor White
     $h = Get-AdfsResponseHeaders
-    Write-Host ("  CORS (Enabled={0}, {1} origins):" -f $h.CORSEnabled, @($h.CORSTrustedOrigins).Count) -ForegroundColor Gray
-    @($h.CORSTrustedOrigins) | Sort-Object | ForEach-Object { Write-Host ("      " + $_) }
+    Write-Host ("   CORSEnabled : " + $h.CORSEnabled + "   (origins: " + @($h.CORSTrustedOrigins).Count + ")")
+    @($h.CORSTrustedOrigins) | Sort-Object | ForEach-Object { Write-Host ("        origin : " + $_) }
+
+    Write-Host "-- Certificates --" -ForegroundColor White
+    Get-AdfsCertificate | Sort-Object CertificateType | ForEach-Object {
+        Write-Host ("   " + $_.CertificateType + " : " + $_.Thumbprint + "   IsPrimary=" + $_.IsPrimary)
+    }
+
+    Write-Host "-- SSL Bindings --" -ForegroundColor White
+    Get-AdfsSslCertificate | Sort-Object HostName, PortNumber | ForEach-Object {
+        Write-Host ("   " + $_.HostName + ":" + $_.PortNumber + " -> " + $_.CertificateHash)
+    }
 }
 
 # --- Discover environment from the bound cert + federation properties ---
@@ -124,12 +154,14 @@ Show-State "1. PREVIOUS ENVIRONMENT (baseline, before any change)"
 
 try {
     # ===== APPLY -Site via the shipped functions =====
+    # 6>$null suppresses the migration functions' own Write-Host progress so the
+    # three Show-State snapshots stay clean. Return values still flow normally.
     foreach ($e in $baseApps) {
         $new = Build-ReplacedRedirectList -ExistingRedirects $e.Uris -OldSuffix $suffix -NewSuffix $suffix -SanNames $sans -Site $Site
         Set-AdfsNativeClientApplication -TargetApplication (Get-NativeApp -Id $e.Id) -RedirectUri $new -ErrorAction Stop
     }
-    $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $adfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site)
-    Update-CorsTrustedOrigins -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -SanNames $sans -TargetAdfsHostname $adfsHost -ProposedOrigins $proposed
+    $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $adfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site 6>$null)
+    Update-CorsTrustedOrigins -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -SanNames $sans -TargetAdfsHostname $adfsHost -ProposedOrigins $proposed 6>$null
 
     # ===== MODIFIED (SITE) ENVIRONMENT =====
     $afterApps = Get-NativeAppMap
