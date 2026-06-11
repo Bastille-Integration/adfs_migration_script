@@ -36,9 +36,11 @@ param(
 
     # Optional site code. When supplied, for every migrated app host the script
     # also registers a "<first-label>-<site>" variant (e.g. admin -> admin-<site>)
-    # as both a redirect URI and a CORS origin, alongside the base host. The ADFS
-    # host (set via -TargetAdfsHostname) is not site-coded. Prompted interactively
-    # if omitted; leave blank for none.
+    # as both a redirect URI and a CORS origin, alongside the base host. The
+    # ADFS/federation host is ALSO site-coded (auth.adfs -> auth-<site>.adfs): since
+    # the federation service is a single host, that REPLACES HostName/Identifier/
+    # DisplayName + its CORS origin (pass the base host via -TargetAdfsHostname).
+    # Prompted interactively if omitted; leave blank for none.
     [string]$Site = '',
 
     [string]$CorsExtraOrigins = '',
@@ -1673,8 +1675,19 @@ if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Site')) {
     $resp = (Read-Host "Optional site code to also register <app>-<site> hosts (blank = none)").Trim()
     if (-not [string]::IsNullOrWhiteSpace($resp)) { $Site = $resp }
 }
+
+# When a site code is given, the ADFS/federation host is site-coded like the app
+# hosts: auth.adfs.<domain> -> auth-<site>.adfs.<domain>. The federation service is
+# a single host, so this REPLACES the host (HostName/Identifier/DisplayName + its
+# CORS origin) rather than adding a sibling. Pass the base host via -TargetAdfsHostname.
+$effectiveAdfsHostname = $TargetAdfsHostname
 if (-not [string]::IsNullOrWhiteSpace($Site)) {
     Write-Host "Site code            : $Site  (adds <app>-$Site hosts)" -ForegroundColor Cyan
+    $codedAdfs = Add-SiteToHost -Hostname $TargetAdfsHostname -Site $Site
+    if (-not [string]::IsNullOrWhiteSpace($codedAdfs)) {
+        $effectiveAdfsHostname = $codedAdfs
+        Write-Host "ADFS host (site-coded): $effectiveAdfsHostname" -ForegroundColor Cyan
+    }
 }
 
 if (-not $NonInteractive) {
@@ -1735,7 +1748,7 @@ if (-not $SkipFederationServiceProperties) {
         -OldSuffix $OldHostSuffix `
         -NewSuffix $NewHostSuffix `
         -SanNames $certSanNames `
-        -TargetAdfsHostname $TargetAdfsHostname
+        -TargetAdfsHostname $effectiveAdfsHostname
 }
 else {
     Write-Host ""
@@ -1745,7 +1758,7 @@ else {
 if (-not $SkipCors) {
     $proposedCorsOrigins = @(Resolve-AppCorsOrigins `
         -SanNames $certSanNames `
-        -TargetAdfsHostname $TargetAdfsHostname `
+        -TargetAdfsHostname $effectiveAdfsHostname `
         -OldSuffix $OldHostSuffix `
         -NewSuffix $NewHostSuffix `
         -ParamExtraOrigins $CorsExtraOrigins `
@@ -1756,7 +1769,7 @@ if (-not $SkipCors) {
         -NewSuffix $NewHostSuffix `
         -ParamExtraOrigins $CorsExtraOrigins `
         -SanNames $certSanNames `
-        -TargetAdfsHostname $TargetAdfsHostname `
+        -TargetAdfsHostname $effectiveAdfsHostname `
         -ProposedOrigins $proposedCorsOrigins
 }
 else {

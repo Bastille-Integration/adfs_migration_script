@@ -134,12 +134,18 @@ $suffix   = Get-NewHostSuffixFromCertificateWildcardSan -Cert $cert
 if ([string]::IsNullOrWhiteSpace($suffix)) { $suffix = Get-NewHostSuffixFromCertificateSans -Cert $cert }
 $adfsHost = (Get-AdfsProperties).HostName.ToLowerInvariant()
 $adfsOrigin = "https://" + $adfsHost
+# -Site site-codes the federation host too (auth.adfs -> auth-<site>.adfs), matching
+# the main script. The federation host is singular, so it is replaced (not base+variant).
+$effectiveAdfsHost   = Add-SiteToHost -Hostname $adfsHost -Site $Site
+if ([string]::IsNullOrWhiteSpace($effectiveAdfsHost)) { $effectiveAdfsHost = $adfsHost }
+$effectiveAdfsOrigin = "https://" + $effectiveAdfsHost
 
 Write-Host ""
 Write-Host "================ Test: -Site '$Site' ================" -ForegroundColor Cyan
-Write-Host ("  Suffix    : " + $suffix)
-Write-Host ("  ADFS host : " + $adfsHost + "   (must NOT be site-coded)")
-Write-Host ("  Cert SANs : " + ($sans -join ', '))
+Write-Host ("  Suffix             : " + $suffix)
+Write-Host ("  ADFS host          : " + $adfsHost)
+Write-Host ("  ADFS host (coded)  : " + $effectiveAdfsHost + "   (federation host is site-coded)")
+Write-Host ("  Cert SANs          : " + ($sans -join ', '))
 
 # --- Capture baseline ---
 $baseApps        = Get-NativeAppMap
@@ -160,8 +166,8 @@ try {
         $new = Build-ReplacedRedirectList -ExistingRedirects $e.Uris -OldSuffix $suffix -NewSuffix $suffix -SanNames $sans -Site $Site
         Set-AdfsNativeClientApplication -TargetApplication (Get-NativeApp -Id $e.Id) -RedirectUri $new -ErrorAction Stop
     }
-    $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $adfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site 6>$null)
-    Update-CorsTrustedOrigins -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -SanNames $sans -TargetAdfsHostname $adfsHost -ProposedOrigins $proposed 6>$null
+    $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $effectiveAdfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site 6>$null)
+    Update-CorsTrustedOrigins -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -SanNames $sans -TargetAdfsHostname $effectiveAdfsHost -ProposedOrigins $proposed 6>$null
 
     # ===== MODIFIED (SITE) ENVIRONMENT =====
     $afterApps = Get-NativeAppMap
@@ -183,14 +189,15 @@ try {
 
     Write-Host "CORS origins:"
     foreach ($o in $baseCors) {
+        if ($o -eq $adfsOrigin) { continue }   # federation host handled separately below
         Assert ("base preserved : " + $o) ($afterCors -contains $o)
-        if ($o -ne $adfsOrigin) {
-            $exp = Expect-SiteOrigin -Origin $o -Site $Site
-            Assert ("site variant   : " + $exp) ($afterCors -contains $exp)
-        }
+        $exp = Expect-SiteOrigin -Origin $o -Site $Site
+        Assert ("site variant   : " + $exp) ($afterCors -contains $exp)
     }
-    $adfsSiteOrigin = Expect-SiteOrigin -Origin $adfsOrigin -Site $Site
-    Assert ("ADFS host NOT site-coded ($adfsSiteOrigin absent)") (-not ($afterCors -contains $adfsSiteOrigin))
+    # Federation host: site-coded form present (replaces the base), and not double-coded.
+    Assert ("ADFS host site-coded present : " + $effectiveAdfsOrigin) ($afterCors -contains $effectiveAdfsOrigin)
+    $doubleCoded = Expect-SiteOrigin -Origin $effectiveAdfsOrigin -Site $Site
+    Assert ("ADFS host not double-coded ($doubleCoded absent)") (-not ($afterCors -contains $doubleCoded))
 }
 finally {
     # ===== CLEANUP: restore exact baseline =====
