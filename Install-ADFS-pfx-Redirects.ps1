@@ -1076,13 +1076,17 @@ function Update-FederationServiceProperties {
         }
     }
 
-    # DisplayName is human-readable text - suffix swap is sufficient regardless of mode
+    # DisplayName is human-readable text. In heuristic mode a suffix swap is enough;
+    # in explicit mode it is aligned to the target hostname below so it matches HostName.
     $newDisplayName = Replace-SuffixInText -Text $currentDisplayName -OldSuffix $OldSuffix -NewSuffix $NewSuffix
 
     if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
         # --- Explicit hostname mode ---
         # Set HostName directly to what the operator specified.
         $newHostName = $TargetAdfsHostname.Trim().ToLowerInvariant()
+        # Keep DisplayName consistent with the new HostName (avoids a stale prefix
+        # like auth.adfs.<domain> when the host is auth-<site>.adfs.<domain>).
+        $newDisplayName = $newHostName
 
         # Rebuild Identifier by replacing only the host portion of the existing URI,
         # preserving its scheme, path, and query so the federation metadata URL stays valid.
