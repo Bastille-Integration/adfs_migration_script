@@ -265,7 +265,37 @@ foreach ($s in $scenarios) {
     Assert "no old-suffix hosts remain in rebuilt redirects" ($leakedOld.Count -eq 0) ("leaked: " + ($leakedOld -join ' | '))
     $doubleCoded = @($rebuilt | Where-Object { $_ -match 'site9-site9|-site9-site9' })
     Assert "no host is double site-coded" ($doubleCoded.Count -eq 0) ("double: " + ($doubleCoded -join ' | '))
+
+    # --- Build-ReplacedRedirectList: -SiteOnly (home-only) drops the base host ---
+    # Feed both a base host and an already-site-coded host; expect only site-coded out.
+    $existingHomeOnly = @(
+        "https://admin.$OldSuffix/adfs/oauth/callback",
+        ("https://" + (Add-SiteToHost -Hostname $s.AppMap['admin'] -Site 'site9') + "/adfs/oauth/callback")
+    )
+    $siteOnly = Build-ReplacedRedirectList -ExistingRedirects $existingHomeOnly -OldSuffix $OldSuffix -SanNames $sans -Site 'site9' -SiteOnly | ForEach-Object { $_ }
+    Assert "[-SiteOnly] contains the site-coded admin URI" ($siteOnly -contains $adminSite) ("have: " + ($siteOnly -join ' | '))
+    Assert "[-SiteOnly] base admin URI is removed"         (-not ($siteOnly -contains $adminBase)) ("have: " + ($siteOnly -join ' | '))
+    $soDouble = @($siteOnly | Where-Object { $_ -match 'site9-site9' })
+    Assert "[-SiteOnly] no double site-coding"             ($soDouble.Count -eq 0) ("double: " + ($soDouble -join ' | '))
 }
+
+Write-Host ""
+Write-Host "===== Old-suffix detection (Get-MostCommonHostSuffix) =====" -ForegroundColor Magenta
+# Regression: a deeper federation-host suffix (adfs.<domain>, shared by ONE host)
+# must not beat the base app-host domain shared by all hosts. This is the bug that
+# made -Site home skip every redirect (picked 'adfs.bn-wids.internal').
+$mixedHosts = @(
+    'admin-home.bn-wids.internal','device-home.bn-wids.internal','dvr-home.bn-wids.internal',
+    'explorer-home.bn-wids.internal','wti-home.bn-wids.internal','auth-home.adfs.bn-wids.internal'
+)
+$suffix = Get-MostCommonHostSuffix -Hosts $mixedHosts
+Assert "mixed app + federation hosts -> base domain (not adfs.<domain>)" ($suffix -eq 'bn-wids.internal') ("got: '$suffix'")
+# Base + home + ADFS (the 11-origin pre-cleanup set) still resolves to the base.
+$suffix2 = Get-MostCommonHostSuffix -Hosts @('admin.bn-wids.internal','admin-home.bn-wids.internal','auth-home.adfs.bn-wids.internal')
+Assert "base + home + adfs -> base domain" ($suffix2 -eq 'bn-wids.internal') ("got: '$suffix2'")
+# A flat single-domain set resolves to that domain.
+$suffix3 = Get-MostCommonHostSuffix -Hosts @('wids-admin-lab16.oraphys-lab.example','wids-dvr-lab16.oraphys-lab.example')
+Assert "flat hosts -> shared domain" ($suffix3 -eq 'oraphys-lab.example') ("got: '$suffix3'")
 
 Write-Host ""
 $color = if ($script:Fail -eq 0) { 'Green' } else { 'Red' }

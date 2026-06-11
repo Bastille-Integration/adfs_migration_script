@@ -1,4 +1,4 @@
-# Version: 2.3
+# Version: 2.4
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
@@ -43,6 +43,12 @@ param(
     # Prompted interactively if omitted; leave blank for none.
     [string]$Site = '',
 
+    # When set together with -Site, the site-coded host REPLACES the base host
+    # everywhere (redirect URIs and CORS origins) instead of being registered
+    # alongside it. So -Site home -SiteOnly yields admin-home only (admin is
+    # removed), giving a clean "home"-only deployment. No effect without -Site.
+    [switch]$SiteOnly,
+
     [string]$CorsExtraOrigins = '',
 
     [switch]$NoExportable,
@@ -68,7 +74,7 @@ param(
     [switch]$NonInteractive
 )
 
-$ScriptVersion = '2.3'
+$ScriptVersion = '2.4'
 
 function Stop-Script {
     param([string]$Message)
@@ -572,6 +578,41 @@ function Get-BestLeafCertificate {
     return $candidates[0]
 }
 
+function Get-MostCommonHostSuffix {
+    # Given a set of hostnames, return the parent suffix shared by the MOST of them.
+    # Candidate suffixes are each host's parent (first label stripped); the winner is
+    # the suffix that the greatest number of hosts end with, tie-broken by the fewest
+    # labels (the more general/base domain). This avoids picking a deeper federation-
+    # host suffix (e.g. adfs.<domain>, shared by only the one ADFS host) over the base
+    # app-host domain (<domain>) that every host shares.
+    param([string[]]$Hosts)
+
+    $hs = @($Hosts |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $_.Trim().ToLowerInvariant() })
+    if ($hs.Count -eq 0) { return $null }
+
+    $candidates = @()
+    foreach ($h in $hs) {
+        $parts = $h.Split('.')
+        if ($parts.Count -ge 3) {
+            $candidates += (($parts | Select-Object -Skip 1) -join '.')
+        }
+    }
+    $candidates = @($candidates | Sort-Object -Unique)
+    if ($candidates.Count -eq 0) { return $null }
+
+    $best = $null; $bestScore = -1; $bestLabels = [int]::MaxValue
+    foreach ($c in $candidates) {
+        $score  = @($hs | Where-Object { $_ -eq $c -or $_.EndsWith('.' + $c) }).Count
+        $labels = ($c.Split('.')).Count
+        if ($score -gt $bestScore -or ($score -eq $bestScore -and $labels -lt $bestLabels)) {
+            $best = $c; $bestScore = $score; $bestLabels = $labels
+        }
+    }
+    return $best
+}
+
 function Get-HostSuffixFromCorsTrustedOrigins {
     try {
         $headers = Get-AdfsResponseHeaders -ErrorAction Stop
@@ -581,6 +622,7 @@ function Get-HostSuffixFromCorsTrustedOrigins {
         return $null
     }
 
+    $hosts = @()
     foreach ($origin in @($headers.CORSTrustedOrigins)) {
         if ([string]::IsNullOrWhiteSpace($origin)) { continue }
 
@@ -588,16 +630,10 @@ function Get-HostSuffixFromCorsTrustedOrigins {
         if (-not [System.Uri]::TryCreate($origin, [System.UriKind]::Absolute, [ref]$parsed)) {
             continue
         }
-
-        $hostname = $parsed.Host.ToLowerInvariant()
-        $parts = $hostname.Split('.')
-
-        if ($parts.Count -ge 3) {
-            return (($parts | Select-Object -Skip 1) -join '.')
-        }
+        $hosts += $parsed.Host
     }
 
-    return $null
+    return (Get-MostCommonHostSuffix -Hosts $hosts)
 }
 
 function Normalize-UriString {
@@ -912,7 +948,10 @@ function Build-ReplacedRedirectList {
         [string]$OldSuffix,
         [string]$NewSuffix,
         [string[]]$SanNames = @(),
-        [string]$Site = ''
+        [string]$Site = '',
+        # When set with -Site, register ONLY the site-coded host (replace the base
+        # host) instead of keeping both.
+        [switch]$SiteOnly
     )
 
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -929,16 +968,25 @@ function Build-ReplacedRedirectList {
             $migrated = Replace-HostSuffix -UriString $uri -OldSuffix $OldSuffix -NewSuffix $NewSuffix
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($migrated)) {
-            if ($set.Add($migrated)) {
-                [void]$result.Add($migrated)
-            }
-            # Also register the site-coded variant (admin -> admin-<site>).
-            if (-not [string]::IsNullOrWhiteSpace($Site)) {
-                $siteUri = Add-SiteToUri -UriString $migrated -Site $Site
-                if (-not [string]::IsNullOrWhiteSpace($siteUri) -and $set.Add($siteUri)) {
-                    [void]$result.Add($siteUri)
-                }
+        if ([string]::IsNullOrWhiteSpace($migrated)) { continue }
+
+        if (-not [string]::IsNullOrWhiteSpace($Site) -and $SiteOnly) {
+            # Home-only: emit the site-coded host instead of the base. If the host
+            # is already site-coded (Add-SiteToUri returns null) keep it as-is.
+            $siteUri = Add-SiteToUri -UriString $migrated -Site $Site
+            $emit = if ([string]::IsNullOrWhiteSpace($siteUri)) { $migrated } else { $siteUri }
+            if ($set.Add($emit)) { [void]$result.Add($emit) }
+            continue
+        }
+
+        if ($set.Add($migrated)) {
+            [void]$result.Add($migrated)
+        }
+        # Additive mode: also register the site-coded variant (admin -> admin-<site>).
+        if (-not [string]::IsNullOrWhiteSpace($Site)) {
+            $siteUri = Add-SiteToUri -UriString $migrated -Site $Site
+            if (-not [string]::IsNullOrWhiteSpace($siteUri) -and $set.Add($siteUri)) {
+                [void]$result.Add($siteUri)
             }
         }
     }
@@ -983,11 +1031,13 @@ function Update-NativeAppRedirects {
 
         [string[]]$SanNames = @(),
 
-        [string]$Site = ''
+        [string]$Site = '',
+
+        [switch]$SiteOnly
     )
 
     $current = @($AppInfo.RedirectUri)
-    $updated = Build-ReplacedRedirectList -ExistingRedirects $current -OldSuffix $OldSuffix -NewSuffix $NewSuffix -SanNames $SanNames -Site $Site
+    $updated = Build-ReplacedRedirectList -ExistingRedirects $current -OldSuffix $OldSuffix -NewSuffix $NewSuffix -SanNames $SanNames -Site $Site -SiteOnly:$SiteOnly
 
     Write-Host ""
     Write-Host "Application Group : $($AppInfo.GroupName)" -ForegroundColor DarkGray
@@ -1202,7 +1252,10 @@ function Resolve-AppCorsOrigins {
         [string]$OldSuffix = '',
         [string]$NewSuffix = '',
         [string]$ParamExtraOrigins = '',
-        [string]$Site = ''
+        [string]$Site = '',
+        # When set with -Site, the site-coded app origin REPLACES the base app
+        # origin instead of being added alongside it.
+        [switch]$SiteOnly
     )
 
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -1286,16 +1339,40 @@ function Resolve-AppCorsOrigins {
     # ADFS host origin ($adfsOrigin) is excluded because the caller already passes
     # it site-coded (TargetAdfsHostname = effective host); skipping avoids double-coding.
     if (-not [string]::IsNullOrWhiteSpace($Site)) {
-        $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
-        foreach ($o in $appOrigins) {
-            $parsed = $null
-            if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
-            $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site
-            if ([string]::IsNullOrWhiteSpace($siteHost)) { continue }
-            $siteOrigin = $parsed.Scheme + '://' + $siteHost
-            if ($set.Add($siteOrigin)) {
-                [void]$result.Add($siteOrigin)
-                Write-Host "  + $siteOrigin  [site: $Site]" -ForegroundColor DarkCyan
+        if ($SiteOnly) {
+            # Home-only: rebuild the set as the ADFS origin (already site-coded) plus
+            # the site-coded form of each app origin, dropping the base app origins.
+            $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
+            $set.Clear()
+            $result = New-Object 'System.Collections.Generic.List[string]'
+            if (-not [string]::IsNullOrWhiteSpace($adfsOrigin) -and $set.Add($adfsOrigin)) {
+                [void]$result.Add($adfsOrigin)
+            }
+            foreach ($o in $appOrigins) {
+                $parsed = $null
+                if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
+                $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site
+                # Already site-coded (returns null) -> keep the origin as-is.
+                $emitHost = if ([string]::IsNullOrWhiteSpace($siteHost)) { $parsed.Host } else { $siteHost }
+                $emit = $parsed.Scheme + '://' + $emitHost
+                if ($set.Add($emit)) {
+                    [void]$result.Add($emit)
+                    Write-Host "  + $emit  [site-only: $Site]" -ForegroundColor DarkCyan
+                }
+            }
+        }
+        else {
+            $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
+            foreach ($o in $appOrigins) {
+                $parsed = $null
+                if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
+                $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site
+                if ([string]::IsNullOrWhiteSpace($siteHost)) { continue }
+                $siteOrigin = $parsed.Scheme + '://' + $siteHost
+                if ($set.Add($siteOrigin)) {
+                    [void]$result.Add($siteOrigin)
+                    Write-Host "  + $siteOrigin  [site: $Site]" -ForegroundColor DarkCyan
+                }
             }
         }
     }
@@ -1725,7 +1802,7 @@ else {
     }
 
     foreach ($app in $toProcess) {
-        Update-NativeAppRedirects -AppInfo $app -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames -Site $Site
+        Update-NativeAppRedirects -AppInfo $app -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames -Site $Site -SiteOnly:$SiteOnly
     }
 }
 
@@ -1748,7 +1825,8 @@ if (-not $SkipCors) {
         -OldSuffix $OldHostSuffix `
         -NewSuffix $NewHostSuffix `
         -ParamExtraOrigins $CorsExtraOrigins `
-        -Site $Site)
+        -Site $Site `
+        -SiteOnly:$SiteOnly)
 
     Update-CorsTrustedOrigins `
         -OldSuffix $OldHostSuffix `

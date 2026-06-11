@@ -406,6 +406,19 @@ Skips the interactive FQDN prompt and sets the Federation Service HostName, Iden
 
 Pass the **base** ADFS host (`auth.adfs.bn-wids.internal`). With `-Site home` the script registers the `admin-home`, `dvr-home`, … app variants (redirect URIs **and** CORS origins) **and** site-codes the federation host itself to `auth-home.adfs.bn-wids.internal` (HostName / Identifier / DisplayName + its CORS origin). Omit `-Site` to be prompted (blank = none).
 
+### Home-only deployment (`-Site` + `-SiteOnly`)
+
+```powershell
+.\Install-ADFS-pfx-Redirects.ps1 `
+    -PfxPath "C:\Temp\adfs-cert.pfx" `
+    -TargetAdfsHostname "auth.adfs.bn-wids.internal" `
+    -Site "home" -SiteOnly
+```
+
+By default `-Site` is **additive** (keeps `admin` *and* adds `admin-home`). Add **`-SiteOnly`** to make the site-coded host **replace** the base host everywhere — redirect URIs and CORS origins both become `admin-home`, `dvr-home`, … only, and the base `admin`/`dvr`/… entries are removed. Combined with the CORS clean-replace, this produces a clean, single-site deployment with no leftover base hosts. A host that is already site-coded is kept as-is (no double-coding). No effect without `-Site`.
+
+> **Tip:** the old suffix is auto-detected as the domain shared by the **most** existing hosts (so a deeper federation-host suffix like `adfs.<domain>` won't be mistaken for the app-host domain). If detection ever picks the wrong suffix, state it explicitly with `-OldHostSuffix`.
+
 ### With a password-protected PFX
 
 ```powershell
