@@ -1283,7 +1283,8 @@ function Resolve-AppCorsOrigins {
     }
 
     # Add a site-coded variant for each APP origin (admin -> admin-<site>). The
-    # ADFS host origin is intentionally excluded - it is not site-coded.
+    # ADFS host origin ($adfsOrigin) is excluded because the caller already passes
+    # it site-coded (TargetAdfsHostname = effective host); skipping avoids double-coding.
     if (-not [string]::IsNullOrWhiteSpace($Site)) {
         $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
         foreach ($o in $appOrigins) {
@@ -1343,35 +1344,13 @@ function Update-CorsTrustedOrigins {
     $combined = New-Object 'System.Collections.Generic.List[string]'
 
     if ($ProposedOrigins.Count -gt 0) {
-        # Start with the freshly-resolved proposed list.
+        # Clean replace: the trusted-origin set becomes EXACTLY the freshly-resolved
+        # proposed list. Existing origins are NOT merged back, so old/stale origins
+        # (and any entry not re-derived by discovery) are removed. Use the
+        # interactive editor or -CorsExtraOrigins to add anything not auto-resolved.
         foreach ($origin in $ProposedOrigins) {
             if (-not [string]::IsNullOrWhiteSpace($origin) -and $set.Add($origin)) {
                 [void]$combined.Add($origin)
-            }
-        }
-
-        # Preserve any existing origins that are NOT on the old suffix and were
-        # not already covered by the proposed list (e.g. entries that discovery
-        # missed because native-app redirect URIs were absent or incomplete).
-        foreach ($origin in $existing) {
-            if ([string]::IsNullOrWhiteSpace($origin)) { continue }
-            $normalized = Convert-ToCorsOrigin -UriString $origin
-            if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
-
-            if (-not [string]::IsNullOrWhiteSpace($OldSuffix)) {
-                $parsedCheck = $null
-                if ([System.Uri]::TryCreate($origin, [System.UriKind]::Absolute, [ref]$parsedCheck)) {
-                    $hostCheck = $parsedCheck.Host.ToLowerInvariant()
-                    $oldSuffixNorm = $OldSuffix.Trim().ToLowerInvariant()
-                    if ($hostCheck -eq $oldSuffixNorm -or $hostCheck.EndsWith('.' + $oldSuffixNorm)) {
-                        continue  # on old suffix - let proposed list replace it
-                    }
-                }
-            }
-
-            if ($set.Add($normalized)) {
-                [void]$combined.Add($normalized)
-                Write-Host "  Preserved existing origin: $normalized" -ForegroundColor DarkGray
             }
         }
     }
