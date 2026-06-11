@@ -506,6 +506,9 @@ Before the update, the script snapshots the old ADFS certificate thumbprints fro
 **Stage 3 — Final cleanup:**
 After Stage 2, the script performs one final sweep via `netsh http show sslcert` and deletes any remaining bindings still referencing the old certificate thumbprint. This catches any entry that could not be re-added and ensures no stale binding is left on the system.
 
+**Stage 4 — Previous-host cleanup (hostname-only changes):**
+The thumbprint sweeps above only catch bindings on the *old certificate*. When the **federation hostname** changes but the cert does **not** (for example `-Site` coding `auth.adfs` → `auth-<site>.adfs` on the same cert), the old host's binding sits on the current thumbprint and would otherwise linger. The script records the federation hostname before changing it and, if it changed (and Federation Service Properties were updated), removes the previous host's `:443`/`:49443` bindings.
+
 After the ADFS service restarts, `openssl s_client` should show the new certificate.
 
 ### Private key permissions

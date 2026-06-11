@@ -1690,6 +1690,13 @@ if (-not [string]::IsNullOrWhiteSpace($Site)) {
     }
 }
 
+# Record the federation hostname BEFORE it is changed, so a hostname-only change
+# (e.g. -Site, where the cert thumbprint does not change) can clean up the old
+# host's stale HTTP.SYS SSL binding afterward. The thumbprint-based stale sweep
+# below only catches OLD-CERT bindings, not an old host on the same cert.
+$previousAdfsHostname = $null
+try { $previousAdfsHostname = (Get-AdfsProperties -ErrorAction Stop).HostName } catch {}
+
 if (-not $NonInteractive) {
     if (-not (Confirm-Action "Proceed with certificate binding and suffix replacement? (y/n)")) {
         Stop-Script "Cancelled by user."
@@ -1908,6 +1915,22 @@ if (-not $SkipAdfsSsl) {
 else {
     Write-Host ""
     Write-Host "Skipped AD FS SSL update because -SkipAdfsSsl was specified." -ForegroundColor Yellow
+}
+
+# Hostname-only change cleanup: when the federation host changed but the cert did
+# NOT (e.g. -Site coded auth.adfs -> auth-<site>.adfs on the same cert), the old
+# host's HTTP.SYS binding sits on the current thumbprint, so the stale-by-thumbprint
+# sweep above won't catch it. Remove the previous host's bindings here.
+if (-not $SkipAdfsSsl -and -not $SkipFederationServiceProperties -and
+    -not [string]::IsNullOrWhiteSpace($previousAdfsHostname) -and
+    $previousAdfsHostname -ne $effectiveAdfsHostname) {
+    Write-Host ""
+    Write-Host ("Removing previous federation host SSL bindings: " + $previousAdfsHostname) -ForegroundColor Cyan
+    foreach ($port in @('443', '49443')) {
+        $hp = $previousAdfsHostname + ':' + $port
+        & netsh http delete sslcert hostnameport=$hp 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Host ("  Removed " + $hp) -ForegroundColor Green }
+    }
 }
 
 # --- Optional ADFS configuration tweaks (token certs, endpoints) ---
