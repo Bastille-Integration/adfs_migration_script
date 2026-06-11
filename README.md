@@ -9,6 +9,7 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 | `New-BastilleAdUsers.ps1` | Guided RBAC provisioning of the AD + ADFS identity layer. |
 | `Invoke-AdfsTroubleshoot.ps1` | ADFS health, certificate, and account-lockout diagnostics. |
 | `Test-SiteFeature.ps1` | Self-restoring test of the `-Site` feature (run after changing the migration script). |
+| `Show-AdfsConfig.ps1` | Read-only snapshot of the ADFS config (federation props, apps/redirects, CORS, certs, SSL bindings). |
 
 ## What each script does
 
