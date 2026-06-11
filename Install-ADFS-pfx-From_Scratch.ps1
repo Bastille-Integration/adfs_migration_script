@@ -50,7 +50,7 @@ param(
 )
 
 # ---------------------------------------------------------------------------
-# Claim rules applied to every Web API — maps AD attributes to OIDC claims
+# Claim rules applied to every Web API - maps AD attributes to OIDC claims
 # ---------------------------------------------------------------------------
 
 $IssuanceTransformRules = @'
@@ -69,7 +69,7 @@ c:[Type == "http://schemas.microsoft.com/ws/2008/06/identity/claims/windowsaccou
 # ServiceLabels: one or more cert SAN service labels whose hostnames feed
 #                redirect URIs for this group (DVR and Device share one group)
 # ClientId:      used as both the native client Identifier and the Web API
-#                Identifier — matches the "paste the client identifier" step
+#                Identifier - matches the "paste the client identifier" step
 #                in the ADFS wizard
 # AccessGroups:  AD security groups that are permitted access to the Web API
 #                (applied via "Permit specific group" access control policy)
@@ -94,7 +94,7 @@ $AppDefinitions = @(
         GroupName     = 'Bastille ADAM'
         ClientId      = 'bastille-adam'
         ServiceLabels = @('explorer')
-        RedirectPaths = @('/auth-callback', '/authenticated', '/signin-callback', '/signout-callback')
+        RedirectPaths = @('/authenticated', '/signin-callback', '/signout-callback')
         AccessGroups  = @('Bastille Admins')
     },
     [PSCustomObject]@{
@@ -273,7 +273,7 @@ function Grant-CertPrivateKeyReadAccess {
     param($Cert, [string]$Account)
     try {
         $pk = $Cert.PrivateKey
-        if ($null -eq $pk) { Write-Warning "No accessible private key — skipping ACL update for '$Account'."; return }
+        if ($null -eq $pk) { Write-Warning "No accessible private key - skipping ACL update for '$Account'."; return }
         $keyPath = Join-Path "$env:ProgramData\Microsoft\Crypto\RSA\MachineKeys" $pk.CspKeyContainerInfo.UniqueKeyContainerName
         if (-not (Test-Path -LiteralPath $keyPath)) { Write-Warning "Private key file not found at '$keyPath'."; return }
         $acl  = Get-Acl -Path $keyPath
@@ -403,11 +403,11 @@ if (-not $SkipWindowsFeature) {
             Stop-Script "Get-WindowsFeature returned nothing for '$featureName'. Ensure this is Windows Server with Server Manager available."
         }
         if ($feature.InstallState -eq 'Installed') {
-            Write-Host "  $featureName — already installed." -ForegroundColor Green
+            Write-Host "  $featureName - already installed." -ForegroundColor Green
         }
         else {
             [void]$toInstall.Add($featureName)
-            Write-Host "  $featureName — will be installed." -ForegroundColor Yellow
+            Write-Host "  $featureName - will be installed." -ForegroundColor Yellow
         }
     }
 
@@ -628,7 +628,7 @@ if (-not $SkipCors) {
             [void]$corsOrigins.Add("https://$san")
         }
         else {
-            Write-Warning "No SAN found for CORS label '$label' — skipped."
+            Write-Warning "No SAN found for CORS label '$label' - skipped."
         }
     }
 
@@ -769,7 +769,7 @@ if (-not $SkipAppRegistration) {
         foreach ($label in $def.ServiceLabels) {
             $san = Resolve-HostnameFromSans -ServiceLabel $label -SanNames $certSans
             if ([string]::IsNullOrWhiteSpace($san)) {
-                Write-Warning "  No matching SAN for label '$label' in '$($def.GroupName)' — skipped."
+                Write-Warning "  No matching SAN for label '$label' in '$($def.GroupName)' - skipped."
                 continue
             }
             [void]$resolvedLabels.Add($san)
@@ -780,7 +780,7 @@ if (-not $SkipAppRegistration) {
 
         if ($redirectUris.Count -eq 0) {
             Write-Host ""
-            Write-Host "  [$($def.GroupName)] No SANs resolved — skipping group." -ForegroundColor Yellow
+            Write-Host "  [$($def.GroupName)] No SANs resolved - skipping group." -ForegroundColor Yellow
             continue
         }
 
@@ -803,7 +803,7 @@ if (-not $SkipAppRegistration) {
                     [void]$groupSids.Add($sid)
                 }
                 else {
-                    Write-Warning "    Could not resolve SID for '$groupName' — using group name as fallback."
+                    Write-Warning "    Could not resolve SID for '$groupName' - using group name as fallback."
                     [void]$groupSids.Add($groupName)
                 }
             }

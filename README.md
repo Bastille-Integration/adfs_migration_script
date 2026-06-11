@@ -113,8 +113,7 @@ The following callback URLs are registered per application group, with hostnames
 - `https://<device-host>/signin-callback`
 - `https://<device-host>/signout-callback`
 
-**ADAM Explorer**
-- `https://<explorer-host>/auth-callback`
+**ADAM Console / Explorer**
 - `https://<explorer-host>/authenticated`
 - `https://<explorer-host>/signin-callback`
 - `https://<explorer-host>/signout-callback`
@@ -123,6 +122,34 @@ The following callback URLs are registered per application group, with hostnames
 - `https://<wtiapi-host>/authenticated`
 - `https://<wtiapi-host>/signin-callback`
 - `https://<wtiapi-host>/signout-callback`
+
+> **Canonical sign-out path:** every app uses `/signout-callback` (no hyphen). Do not register `/sign-out-callback`.
+
+#### Default redirect URL list (canonical, shown on `bn.internal`)
+
+The four browser consoles, fully expanded against the default `bn.internal` domain:
+
+```
+Admin Console
+  https://admin.bn.internal/authenticated
+  https://admin.bn.internal/signin-callback
+  https://admin.bn.internal/signout-callback
+
+DVR Console
+  https://dvr.bn.internal/authenticated
+  https://dvr.bn.internal/signin-callback
+  https://dvr.bn.internal/signout-callback
+
+Device Dashboard
+  https://device.bn.internal/authenticated
+  https://device.bn.internal/signin-callback
+  https://device.bn.internal/signout-callback
+
+ADAM Console / Explorer
+  https://explorer.bn.internal/authenticated
+  https://explorer.bn.internal/signin-callback
+  https://explorer.bn.internal/signout-callback
+```
 
 ### Claim Rules
 
