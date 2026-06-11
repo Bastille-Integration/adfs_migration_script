@@ -8,6 +8,7 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 | `Install-ADFS-pfx-Redirects.ps1` | Migrate an existing ADFS deployment to a new PFX certificate / domain. |
 | `New-BastilleAdUsers.ps1` | Guided RBAC provisioning of the AD + ADFS identity layer. |
 | `Invoke-AdfsTroubleshoot.ps1` | ADFS health, certificate, and account-lockout diagnostics. |
+| `Test-SiteFeature.ps1` | Self-restoring test of the `-Site` feature (run after changing the migration script). |
 
 ## What each script does
 
@@ -18,6 +19,8 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 **`New-BastilleAdUsers.ps1`** — Guided, interactive provisioning of the **identity half** of Bastille RBAC (Active Directory + ADFS). Creates the Bastille OU tree, the role-based security groups (`DVROps`, `DVRViewer`, `ADAMOps`, `ADAMViewer`, `BNAdmin`), sample users, and the ADFS Web API access-control policies; can also add a single user by role (Admin / Operator / Viewer). The **application half** (privileges inside the Fusion Center / ADAM) is completed afterward in the Bastille Tools web app — the script prints step-by-step guidance for it and never contacts those systems. Supports `-ReportOnly`, `-WhatIf`, `-NonInteractive`, and `-Help`.
 
 **`Invoke-AdfsTroubleshoot.ps1`** — Day-to-day, read-only diagnostics for an ADFS node: service status, certificate expiry, recent event-log errors, and AD / ADFS extranet account-lockout state. Can list all locked accounts, or target one user and unlock them (both AD and ADFS) in a single pass.
+
+**`Test-SiteFeature.ps1`** — A regression test for `Install-ADFS-pfx-Redirects.ps1`'s `-Site` feature, meant to run after changes to that script. It loads the shipped functions, applies a `-Site` code (default `sitetest`) to the live ADFS redirect URIs and CORS origins, prints before/after, runs PASS/FAIL assertions (every app host gains a `<label>-<site>` variant; the ADFS host stays un-coded), then restores the exact pre-existing state in a `finally` block. Run as Administrator on an ADFS node: `.\Test-SiteFeature.ps1`. It does not touch certificates, Federation Service properties, or restart ADFS.
 
 ---
 
