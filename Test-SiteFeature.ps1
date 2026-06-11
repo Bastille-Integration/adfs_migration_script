@@ -80,6 +80,22 @@ function Get-NativeAppMap {
 }
 function Get-NativeApp { param([string]$Id) @(Get-AdfsNativeClientApplication) | Where-Object { $_.Identifier -eq $Id } | Select-Object -First 1 }
 
+# Print the full live state (redirect URIs per app + CORS) under a labelled banner.
+function Show-State {
+    param([string]$Label)
+    Write-Host ""
+    Write-Host ("================ " + $Label + " ================") -ForegroundColor Cyan
+    foreach ($g in (Get-AdfsApplicationGroup | Sort-Object Name)) {
+        foreach ($a in @(Get-AdfsNativeClientApplication -ApplicationGroup $g -ErrorAction SilentlyContinue)) {
+            Write-Host ("  [{0}] {1}" -f $g.Name, $a.Name) -ForegroundColor Gray
+            @($a.RedirectUri) | Sort-Object | ForEach-Object { Write-Host ("      " + $_) }
+        }
+    }
+    $h = Get-AdfsResponseHeaders
+    Write-Host ("  CORS (Enabled={0}, {1} origins):" -f $h.CORSEnabled, @($h.CORSTrustedOrigins).Count) -ForegroundColor Gray
+    @($h.CORSTrustedOrigins) | Sort-Object | ForEach-Object { Write-Host ("      " + $_) }
+}
+
 # --- Discover environment from the bound cert + federation properties ---
 $svcThumb = (@(Get-AdfsCertificate -CertificateType Service-Communications))[0].Thumbprint
 $cert     = Get-Item ("Cert:\LocalMachine\My\" + $svcThumb)
@@ -104,14 +120,7 @@ $baseCorsEnabled = [bool](Get-AdfsResponseHeaders).CORSEnabled
 # the CORS apply runs without the interactive add/rm editor during the test.
 $NonInteractive = $true
 
-Write-Host ""
-Write-Host "---------------- BEFORE ----------------" -ForegroundColor Cyan
-foreach ($e in $baseApps) {
-    Write-Host ("[{0}] {1}" -f $e.Group, $e.Name) -ForegroundColor Gray
-    @($e.Uris) | Sort-Object | ForEach-Object { Write-Host ("    " + $_) }
-}
-Write-Host ("CORS ({0}):" -f $baseCors.Count) -ForegroundColor Gray
-@($baseCors) | Sort-Object | ForEach-Object { Write-Host ("    " + $_) }
+Show-State "1. PREVIOUS ENVIRONMENT (baseline, before any change)"
 
 try {
     # ===== APPLY -Site via the shipped functions =====
@@ -122,18 +131,10 @@ try {
     $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $adfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site)
     Update-CorsTrustedOrigins -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -SanNames $sans -TargetAdfsHostname $adfsHost -ProposedOrigins $proposed
 
-    # ===== AFTER =====
+    # ===== MODIFIED (SITE) ENVIRONMENT =====
     $afterApps = Get-NativeAppMap
     $afterCors = @((Get-AdfsResponseHeaders).CORSTrustedOrigins)
-
-    Write-Host ""
-    Write-Host "---------------- AFTER ----------------" -ForegroundColor Cyan
-    foreach ($e in $afterApps) {
-        Write-Host ("[{0}] {1}" -f $e.Group, $e.Name) -ForegroundColor Gray
-        @($e.Uris) | Sort-Object | ForEach-Object { Write-Host ("    " + $_) }
-    }
-    Write-Host ("CORS ({0}):" -f $afterCors.Count) -ForegroundColor Gray
-    @($afterCors) | Sort-Object | ForEach-Object { Write-Host ("    " + $_) }
+    Show-State ("2. MODIFIED ENVIRONMENT (after -Site '" + $Site + "')")
 
     # ===== ASSERTIONS =====
     Write-Host ""
@@ -168,6 +169,8 @@ finally {
         catch { Write-Host ("  restore failed for " + $e.Name + ": " + $_.Exception.Message) -ForegroundColor Red }
     }
     Set-AdfsResponseHeaders -EnableCORS $baseCorsEnabled -CORSTrustedOrigins $baseCors
+
+    Show-State "3. RESTORED ENVIRONMENT (reset - should match #1)"
 
     # Verify restore matches baseline
     $restoredCors = @((Get-AdfsResponseHeaders).CORSTrustedOrigins)
