@@ -1,4 +1,4 @@
-# Version: 2.2
+# Version: 2.3
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
@@ -6,6 +6,7 @@
 # Optional overrides:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -OldHostSuffix "bn.nga.mil" -NewHostSuffix "rta.fak"
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "wids-auth-adfs-abl17.newdomain.com"
+#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "auth-home.adfs.bn-wids.internal" -Site "home"
 
 [CmdletBinding()]
 param(
@@ -25,6 +26,13 @@ param(
     [string]$TargetAdfsHostname,
 
     [string]$ExpectedDnsName,
+
+    # Optional site code. When supplied, for every migrated app host the script
+    # also registers a "<first-label>-<site>" variant (e.g. admin -> admin-<site>)
+    # as both a redirect URI and a CORS origin, alongside the base host. The ADFS
+    # host (set via -TargetAdfsHostname) is not site-coded. Prompted interactively
+    # if omitted; leave blank for none.
+    [string]$Site = '',
 
     [string]$CorsExtraOrigins = '',
 
@@ -852,12 +860,38 @@ function Replace-SuffixInText {
     return ([Regex]::Replace($Text, $escapedOld, $NewSuffix, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase))
 }
 
+function Add-SiteToHost {
+    # Append "-<Site>" to the first DNS label of a hostname:
+    # admin.bn-wids.internal + home -> admin-home.bn-wids.internal.
+    # Returns $null if no site, no host, or the label already carries the suffix.
+    param([string]$Hostname, [string]$Site)
+    if ([string]::IsNullOrWhiteSpace($Site) -or [string]::IsNullOrWhiteSpace($Hostname)) { return $null }
+    $labels = $Hostname -split '\.'
+    if ([string]::IsNullOrWhiteSpace($labels[0])) { return $null }
+    if ($labels[0] -match ('-' + [regex]::Escape($Site) + '$')) { return $null }
+    $labels[0] = $labels[0] + '-' + $Site
+    return ($labels -join '.')
+}
+
+function Add-SiteToUri {
+    # Site-code the host of a full URI, preserving scheme/path/port.
+    param([string]$UriString, [string]$Site)
+    $u = $null
+    if (-not [System.Uri]::TryCreate($UriString, [System.UriKind]::Absolute, [ref]$u)) { return $null }
+    $newHost = Add-SiteToHost -Hostname $u.Host -Site $Site
+    if ([string]::IsNullOrWhiteSpace($newHost)) { return $null }
+    $b = New-Object System.UriBuilder($u)
+    $b.Host = $newHost
+    return $b.Uri.AbsoluteUri
+}
+
 function Build-ReplacedRedirectList {
     param(
         [string[]]$ExistingRedirects,
         [string]$OldSuffix,
         [string]$NewSuffix,
-        [string[]]$SanNames = @()
+        [string[]]$SanNames = @(),
+        [string]$Site = ''
     )
 
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -877,6 +911,13 @@ function Build-ReplacedRedirectList {
         if (-not [string]::IsNullOrWhiteSpace($migrated)) {
             if ($set.Add($migrated)) {
                 [void]$result.Add($migrated)
+            }
+            # Also register the site-coded variant (admin -> admin-<site>).
+            if (-not [string]::IsNullOrWhiteSpace($Site)) {
+                $siteUri = Add-SiteToUri -UriString $migrated -Site $Site
+                if (-not [string]::IsNullOrWhiteSpace($siteUri) -and $set.Add($siteUri)) {
+                    [void]$result.Add($siteUri)
+                }
             }
         }
     }
@@ -919,11 +960,13 @@ function Update-NativeAppRedirects {
         [Parameter(Mandatory = $true)]
         [string]$NewSuffix,
 
-        [string[]]$SanNames = @()
+        [string[]]$SanNames = @(),
+
+        [string]$Site = ''
     )
 
     $current = @($AppInfo.RedirectUri)
-    $updated = Build-ReplacedRedirectList -ExistingRedirects $current -OldSuffix $OldSuffix -NewSuffix $NewSuffix -SanNames $SanNames
+    $updated = Build-ReplacedRedirectList -ExistingRedirects $current -OldSuffix $OldSuffix -NewSuffix $NewSuffix -SanNames $SanNames -Site $Site
 
     Write-Host ""
     Write-Host "Application Group : $($AppInfo.GroupName)" -ForegroundColor DarkGray
@@ -1133,17 +1176,20 @@ function Resolve-AppCorsOrigins {
         [string]$TargetAdfsHostname,
         [string]$OldSuffix = '',
         [string]$NewSuffix = '',
-        [string]$ParamExtraOrigins = ''
+        [string]$ParamExtraOrigins = '',
+        [string]$Site = ''
     )
 
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $result = New-Object 'System.Collections.Generic.List[string]'
+    $adfsOrigin = $null
 
     Write-Host ""
     Write-Host "Resolving CORS trusted origins..." -ForegroundColor Cyan
 
     if (-not [string]::IsNullOrWhiteSpace($TargetAdfsHostname)) {
         $origin = "https://" + $TargetAdfsHostname.Trim().ToLowerInvariant()
+        $adfsOrigin = $origin
         if ($set.Add($origin)) {
             [void]$result.Add($origin)
             Write-Host "  + $origin  [ADFS hostname]" -ForegroundColor DarkCyan
@@ -1208,6 +1254,23 @@ function Resolve-AppCorsOrigins {
         if (-not [string]::IsNullOrWhiteSpace($normalized) -and $set.Add($normalized)) {
             [void]$result.Add($normalized)
             Write-Host "  + $normalized  [extra origin]" -ForegroundColor DarkCyan
+        }
+    }
+
+    # Add a site-coded variant for each APP origin (admin -> admin-<site>). The
+    # ADFS host origin is intentionally excluded - it is not site-coded.
+    if (-not [string]::IsNullOrWhiteSpace($Site)) {
+        $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
+        foreach ($o in $appOrigins) {
+            $parsed = $null
+            if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
+            $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site
+            if ([string]::IsNullOrWhiteSpace($siteHost)) { continue }
+            $siteOrigin = $parsed.Scheme + '://' + $siteHost
+            if ($set.Add($siteOrigin)) {
+                [void]$result.Add($siteOrigin)
+                Write-Host "  + $siteOrigin  [site: $Site]" -ForegroundColor DarkCyan
+            }
         }
     }
 
@@ -1577,6 +1640,15 @@ $TargetAdfsHostname = Get-TargetAdfsHostname `
 Write-Host ""
 Write-Host "Target ADFS hostname : $TargetAdfsHostname" -ForegroundColor Cyan
 
+# Optional site code: also registers <app>-<site> redirect URIs / CORS origins.
+if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Site')) {
+    $resp = (Read-Host "Optional site code to also register <app>-<site> hosts (blank = none)").Trim()
+    if (-not [string]::IsNullOrWhiteSpace($resp)) { $Site = $resp }
+}
+if (-not [string]::IsNullOrWhiteSpace($Site)) {
+    Write-Host "Site code            : $Site  (adds <app>-$Site hosts)" -ForegroundColor Cyan
+}
+
 if (-not $NonInteractive) {
     if (-not (Confirm-Action "Proceed with certificate binding and suffix replacement? (y/n)")) {
         Stop-Script "Cancelled by user."
@@ -1626,7 +1698,7 @@ else {
     }
 
     foreach ($app in $toProcess) {
-        Update-NativeAppRedirects -AppInfo $app -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames
+        Update-NativeAppRedirects -AppInfo $app -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames -Site $Site
     }
 }
 
@@ -1648,7 +1720,8 @@ if (-not $SkipCors) {
         -TargetAdfsHostname $TargetAdfsHostname `
         -OldSuffix $OldHostSuffix `
         -NewSuffix $NewHostSuffix `
-        -ParamExtraOrigins $CorsExtraOrigins)
+        -ParamExtraOrigins $CorsExtraOrigins `
+        -Site $Site)
 
     Update-CorsTrustedOrigins `
         -OldSuffix $OldHostSuffix `
