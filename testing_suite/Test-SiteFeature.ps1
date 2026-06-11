@@ -9,9 +9,10 @@
 # It does NOT touch certificates, Federation Service properties, or restart ADFS.
 #
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module.
-# Usage:
+# Lives in testing_suite/; auto-locates the migration script one directory up.
+# Usage (from the testing_suite directory):
 #   .\Test-SiteFeature.ps1
-#   .\Test-SiteFeature.ps1 -Site sitetest -ScriptPath .\Install-ADFS-pfx-Redirects.ps1
+#   .\Test-SiteFeature.ps1 -Site sitetest -ScriptPath ..\Install-ADFS-pfx-Redirects.ps1
 
 [CmdletBinding()]
 param(
@@ -22,12 +23,19 @@ param(
 $ErrorActionPreference = 'Stop'
 Import-Module ADFS -ErrorAction Stop
 
-# Resolve the migration script path (param > script dir > current dir).
+# Resolve the migration script path. This test lives in testing_suite/, so the
+# migration script is normally one directory up; also accept same-dir and CWD.
 if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
     $base = $PSScriptRoot
     if ([string]::IsNullOrWhiteSpace($base) -and $MyInvocation.MyCommand.Path) { $base = Split-Path -Parent $MyInvocation.MyCommand.Path }
     if ([string]::IsNullOrWhiteSpace($base)) { $base = (Get-Location).Path }
-    $ScriptPath = Join-Path $base 'Install-ADFS-pfx-Redirects.ps1'
+    $candidates = @(
+        (Join-Path (Split-Path -Parent $base) 'Install-ADFS-pfx-Redirects.ps1'),  # parent dir (repo layout)
+        (Join-Path $base 'Install-ADFS-pfx-Redirects.ps1'),                        # same dir
+        (Join-Path (Get-Location).Path 'Install-ADFS-pfx-Redirects.ps1')           # current dir
+    )
+    $ScriptPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($ScriptPath)) { $ScriptPath = $candidates[0] }
 }
 
 # --- Load the shipped functions (everything before the '# --- Main ---' marker) ---

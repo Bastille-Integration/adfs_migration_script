@@ -8,7 +8,7 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 | `Install-ADFS-pfx-Redirects.ps1` | Migrate an existing ADFS deployment to a new PFX certificate / domain. |
 | `New-BastilleAdUsers.ps1` | Guided RBAC provisioning of the AD + ADFS identity layer. |
 | `Invoke-AdfsTroubleshoot.ps1` | ADFS health, certificate, and account-lockout diagnostics. |
-| `Test-SiteFeature.ps1` | Self-restoring test of the `-Site` feature (run after changing the migration script). |
+| `testing_suite/Test-SiteFeature.ps1` | Self-restoring test of the `-Site` feature (run after changing the migration script). |
 | `Show-AdfsConfig.ps1` | Read-only snapshot of the ADFS config (federation props, apps/redirects, CORS, certs, SSL bindings). |
 
 ## What each script does
@@ -21,7 +21,7 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 
 **`Invoke-AdfsTroubleshoot.ps1`** — Day-to-day, read-only diagnostics for an ADFS node: service status, certificate expiry, recent event-log errors, and AD / ADFS extranet account-lockout state. Can list all locked accounts, or target one user and unlock them (both AD and ADFS) in a single pass.
 
-**`Test-SiteFeature.ps1`** — A regression test for `Install-ADFS-pfx-Redirects.ps1`'s `-Site` feature, meant to run after changes to that script. It loads the shipped functions, applies a `-Site` code (default `sitetest`) to the live ADFS redirect URIs and CORS origins, prints before/after, runs PASS/FAIL assertions (every app host gains a `<label>-<site>` variant; the ADFS host stays un-coded), then restores the exact pre-existing state in a `finally` block. Run as Administrator on an ADFS node: `.\Test-SiteFeature.ps1`. It does not touch certificates, Federation Service properties, or restart ADFS.
+**`testing_suite/Test-SiteFeature.ps1`** — A regression test for `Install-ADFS-pfx-Redirects.ps1`'s `-Site` feature, meant to run after changes to that script. It loads the shipped functions, applies a `-Site` code (default `sitetest`) to the live ADFS redirect URIs and CORS origins, prints before/after, runs PASS/FAIL assertions (every app host gains a `<label>-<site>` variant; the ADFS host stays un-coded), then restores the exact pre-existing state in a `finally` block. Run as Administrator on an ADFS node from the `testing_suite` directory: `.\Test-SiteFeature.ps1` (it auto-locates the migration script one directory up). It does not touch certificates, Federation Service properties, or restart ADFS.
 
 ---
 
