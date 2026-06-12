@@ -14,10 +14,10 @@ override with `-ScriptPath` if needed.
 Drives the SAN-based hostname rewriting against two fixture certificates that
 mirror the two conventions seen in the field, starting from a simulated fresh
 `bn.internal` deployment. Makes **no** changes and does **not** require a live
-ADFS node. Where `Get-PfxData` is available (a Windows box) it also reads the SANs
-straight out of the fixture PFX and asserts they match; elsewhere those two
-cert-read checks are skipped and the rewriting logic is still tested against the
-known SAN sets.
+ADFS node. It also **reads the fixture PFXs and asserts their SANs match** — via
+`Get-PfxData` on Windows (the same path the migration script uses) or `openssl` as
+a fallback on macOS/Linux/CI. Only if neither reader is present are those two
+cert-read checks skipped (the rewriting logic still runs against the known SAN sets).
 
 ```powershell
 cd testing_suite

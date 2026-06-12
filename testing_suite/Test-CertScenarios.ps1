@@ -89,23 +89,44 @@ function New-CertLike {
     return [pscustomobject]@{ DnsNameList = @($Sans | ForEach-Object { [pscustomobject]@{ Unicode = $_ } }) }
 }
 
-# Read the SAN list from a fixture PFX via the SHIPPED reader (so the cert path is
-# tested too). Returns $null when Get-PfxData is unavailable or the read fails.
-$canReadPfx = [bool](Get-Command Get-PfxData -ErrorAction SilentlyContinue)
+# Read the SAN list from a fixture PFX so the certs themselves are validated. Prefer
+# the Windows Get-PfxData path (mirrors how the migration script consumes a PFX); fall
+# back to openssl so the fixtures are still tested on macOS/Linux/CI. The reader is
+# 'none' only when neither is available (then cert reads are skipped).
+$canGetPfx  = [bool](Get-Command Get-PfxData -ErrorAction SilentlyContinue)
+$canOpenssl = [bool](Get-Command openssl -ErrorAction SilentlyContinue)
+$pfxReader  = if ($canGetPfx) { 'Get-PfxData' } elseif ($canOpenssl) { 'openssl' } else { 'none' }
+
+function Get-PfxSansViaOpenssl {
+    param([string]$PfxPath, [string]$Password)
+    # Decrypt the leaf cert (legacy 3DES PKCS#12) and pull its SAN DNS names.
+    $pem = & openssl pkcs12 -in $PfxPath -clcerts -nokeys -legacy -passin "pass:$Password" 2>$null | Out-String
+    if ([string]::IsNullOrWhiteSpace($pem)) { return @() }
+    $san = $pem | & openssl x509 -noout -ext subjectAltName 2>$null | Out-String
+    $names = @()
+    foreach ($m in [regex]::Matches($san, 'DNS:([^,\s]+)')) { $names += $m.Groups[1].Value }
+    return @($names | Where-Object { $_ } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Sort-Object -Unique)
+}
+
 function Get-PfxSans {
     param([string]$PfxPath, [string]$Password)
-    if (-not $canReadPfx) { return $null }
     if (-not (Test-Path $PfxPath)) { return $null }
     try {
-        $sec  = ConvertTo-SecureString -String $Password -AsPlainText -Force
-        $data = Get-PfxData -FilePath $PfxPath -Password $sec -ErrorAction Stop
-        $cert = $data.EndEntityCertificates[0]
-        $sans = @(Get-CertificateDnsNames -Cert $cert)
-        if ($sans.Count -eq 0) {
-            $c2   = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 @($PfxPath, $Password)
-            $sans = @(Get-CertificateDnsNames -Cert $c2)
+        if ($pfxReader -eq 'Get-PfxData') {
+            $sec  = ConvertTo-SecureString -String $Password -AsPlainText -Force
+            $data = Get-PfxData -FilePath $PfxPath -Password $sec -ErrorAction Stop
+            $cert = $data.EndEntityCertificates[0]
+            $sans = @(Get-CertificateDnsNames -Cert $cert)
+            if ($sans.Count -eq 0) {
+                $c2   = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 @($PfxPath, $Password)
+                $sans = @(Get-CertificateDnsNames -Cert $c2)
+            }
+            return @($sans)
         }
-        return @($sans)
+        elseif ($pfxReader -eq 'openssl') {
+            return @(Get-PfxSansViaOpenssl -PfxPath $PfxPath -Password $Password)
+        }
+        return $null
     }
     catch {
         Write-Warning ("Failed reading PFX '{0}': {1}" -f $PfxPath, $_.Exception.Message)
@@ -178,7 +199,7 @@ Write-Host ""
 Write-Host "================ Cert-scenario regression test ================" -ForegroundColor Cyan
 Write-Host ("  Migration script : " + $ScriptPath)
 Write-Host ("  Fixture dir      : " + $CertDir)
-Write-Host ("  Get-PfxData      : " + $(if ($canReadPfx) { 'available (cert-read checks ON)' } else { 'unavailable (cert-read checks SKIPPED)' }))
+Write-Host ("  PFX reader       : " + $(if ($pfxReader -eq 'none') { 'none (cert-read checks SKIPPED)' } else { "$pfxReader (cert-read checks ON)" }))
 
 foreach ($s in $scenarios) {
     Write-Host ""
@@ -188,8 +209,8 @@ foreach ($s in $scenarios) {
     $pfxPath  = Join-Path $CertDir $s.PfxFile
     $certSans = Get-PfxSans -PfxPath $pfxPath -Password $PfxPassword
 
-    if (-not $canReadPfx) {
-        Skip ("read SANs from " + $s.PfxFile) 'Get-PfxData not available'
+    if ($pfxReader -eq 'none') {
+        Skip ("read SANs from " + $s.PfxFile) 'no PFX reader (Get-PfxData/openssl) available'
     }
     elseif ($null -eq $certSans) {
         Assert ("read SANs from " + $s.PfxFile) $false "Could not load $pfxPath (missing file or wrong password)"
