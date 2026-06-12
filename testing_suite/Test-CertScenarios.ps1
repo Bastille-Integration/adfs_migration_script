@@ -313,6 +313,33 @@ Assert "home -> office: office host present"   ($r3 -contains 'https://admin-off
 Assert "home -> office: home stripped (no remnant/stacking)" (@($r3 | Where-Object { $_ -match 'home' }).Count -eq 0) ("have: " + ($r3 -join ' | '))
 
 Write-Host ""
+Write-Host "===== Stale federation-host SSL binding cleanup =====" -ForegroundColor Magenta
+# Runs on every SSL-updating run: removes sibling/leftover federation hosts on the
+# ADFS ports, scoped to the ADFS host's parent domain; leaves the current host,
+# localhost, app hosts (different parent), and unrelated :443 sites alone.
+$bindings = @(
+    [pscustomobject]@{ Type='hostnameport'; Binding='auth-home.adfs.bn-wids.internal:443' },    # keep (current)
+    [pscustomobject]@{ Type='hostnameport'; Binding='auth-home.adfs.bn-wids.internal:49443' },   # keep (current)
+    [pscustomobject]@{ Type='hostnameport'; Binding='auth.adfs.bn-wids.internal:443' },          # STALE sibling
+    [pscustomobject]@{ Type='hostnameport'; Binding='auth-office.adfs.bn-wids.internal:49443' }, # STALE sibling
+    [pscustomobject]@{ Type='hostnameport'; Binding='auth-backup.adfs.bn-wids.internal:443' },   # STALE sibling
+    [pscustomobject]@{ Type='hostnameport'; Binding='localhost:443' },                           # keep
+    [pscustomobject]@{ Type='hostnameport'; Binding='admin-home.bn-wids.internal:443' },         # keep (app host, diff parent)
+    [pscustomobject]@{ Type='hostnameport'; Binding='auth.adfs.contoso.com:443' },               # keep (unrelated domain)
+    [pscustomobject]@{ Type='ipport';       Binding='0.0.0.0:443' }                              # keep (ipport, not hostnameport)
+)
+$stale = @(Select-StaleFederationBindings -Bindings $bindings -KeepHost 'auth-home.adfs.bn-wids.internal')
+$staleSet = @($stale | ForEach-Object { $_.Binding })
+Assert "stale sweep removes the 3 sibling federation hosts" ($stale.Count -eq 3) ("got: " + ($staleSet -join ', '))
+Assert "stale sweep keeps current host (443/49443)"  (-not ($staleSet -match 'auth-home\.adfs')) ("got: " + ($staleSet -join ', '))
+Assert "stale sweep keeps localhost"                 (-not ($staleSet -contains 'localhost:443')) ''
+Assert "stale sweep keeps app host (different parent)" (-not ($staleSet -contains 'admin-home.bn-wids.internal:443')) ''
+Assert "stale sweep keeps unrelated domain"          (-not ($staleSet -match 'contoso')) ''
+Assert "stale sweep ignores ipport bindings"         (-not ($staleSet -contains '0.0.0.0:443')) ''
+# No KeepHost -> nothing removed (safety).
+Assert "stale sweep is a no-op without a keep host"  (@(Select-StaleFederationBindings -Bindings $bindings -KeepHost '').Count -eq 0) ''
+
+Write-Host ""
 $color = if ($script:Fail -eq 0) { 'Green' } else { 'Red' }
 Write-Host ("================ RESULT: {0} passed, {1} failed, {2} skipped ================" -f $script:Pass, $script:Fail, $script:Skip) -ForegroundColor $color
 if ($script:Fail -gt 0) { exit 1 }

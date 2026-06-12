@@ -1,4 +1,4 @@
-# Version: 2.6
+# Version: 2.7
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
@@ -75,7 +75,7 @@ param(
     [switch]$NonInteractive
 )
 
-$ScriptVersion = '2.6'
+$ScriptVersion = '2.7'
 
 function Stop-Script {
     param([string]$Message)
@@ -514,6 +514,40 @@ function Get-HttpSysSslBindings {
     if ($null -ne $current) { [void]$bindings.Add($current) }
 
     return ,$bindings.ToArray()
+}
+
+function Select-StaleFederationBindings {
+    # From a list of HTTP.SYS bindings, return the hostnameport bindings on the ADFS
+    # ports (443/49443) whose PARENT domain (everything after the first label) equals
+    # KeepHost's parent, but whose hostname is neither KeepHost nor localhost - i.e.
+    # sibling/leftover federation hosts from earlier runs, sites, or domains
+    # (auth.adfs.<d>, auth-office.adfs.<d>, auth-backup.adfs.<d> when keeping
+    # auth-home.adfs.<d>). Matching on the parent domain isolates federation hosts and
+    # leaves app hosts (admin.<d>, a different parent) and unrelated :443 sites alone.
+    # Pure/testable (no netsh).
+    param($Bindings, [string]$KeepHost)
+
+    if ([string]::IsNullOrWhiteSpace($KeepHost)) { return @() }
+    $keep = $KeepHost.Trim().ToLowerInvariant()
+    $keepParts = $keep -split '\.', 2
+    if ($keepParts.Count -lt 2) { return @() }
+    $parent = $keepParts[1]
+    $ports = @('443', '49443')
+
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($b in @($Bindings)) {
+        if ($b.Type -ne 'hostnameport') { continue }
+        $idx = $b.Binding.LastIndexOf(':')
+        if ($idx -lt 1) { continue }
+        $h = $b.Binding.Substring(0, $idx).Trim().ToLowerInvariant()
+        $p = $b.Binding.Substring($idx + 1).Trim()
+        if ($ports -notcontains $p) { continue }
+        if ($h -eq 'localhost' -or $h -eq $keep) { continue }
+        $hParts = $h -split '\.', 2
+        if ($hParts.Count -lt 2) { continue }
+        if ($hParts[1] -eq $parent) { [void]$out.Add($b) }
+    }
+    return $out.ToArray()
 }
 
 function Update-HttpSysSslBinding {
@@ -2011,19 +2045,33 @@ else {
     Write-Host "Skipped AD FS SSL update because -SkipAdfsSsl was specified." -ForegroundColor Yellow
 }
 
-# Hostname-only change cleanup: when the federation host changed but the cert did
-# NOT (e.g. -Site coded auth.adfs -> auth-<site>.adfs on the same cert), the old
-# host's HTTP.SYS binding sits on the current thumbprint, so the stale-by-thumbprint
-# sweep above won't catch it. Remove the previous host's bindings here.
-if (-not $SkipAdfsSsl -and -not $SkipFederationServiceProperties -and
-    -not [string]::IsNullOrWhiteSpace($previousAdfsHostname) -and
-    $previousAdfsHostname -ne $effectiveAdfsHostname) {
-    Write-Host ""
-    Write-Host ("Removing previous federation host SSL bindings: " + $previousAdfsHostname) -ForegroundColor Cyan
-    foreach ($port in @('443', '49443')) {
-        $hp = $previousAdfsHostname + ':' + $port
-        & netsh http delete sslcert hostnameport=$hp 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Host ("  Removed " + $hp) -ForegroundColor Green }
+# Universal stale federation-host SSL cleanup (runs on EVERY SSL-updating run, not
+# just -Site). The stale-by-thumbprint sweep above only catches OLD-CERT bindings;
+# this removes leftover federation-host bindings that sit on the CURRENT cert -
+# the immediately-previous host after a -Site/host change, AND any older sibling
+# hosts (auth.adfs, auth-office.adfs, auth-backup.adfs, ...) accumulated over prior
+# runs. Scoped to the ADFS host's own parent domain, so app hosts and unrelated
+# :443 sites are never touched.
+if (-not $SkipAdfsSsl) {
+    # The host ADFS now uses: the effective host unless federation props were skipped
+    # (then the live host is unchanged = previous).
+    $keepHost = if ($SkipFederationServiceProperties) { $previousAdfsHostname } else { $effectiveAdfsHostname }
+    if (-not [string]::IsNullOrWhiteSpace($keepHost)) {
+        try {
+            $staleFed = @(Select-StaleFederationBindings -Bindings (Get-HttpSysSslBindings) -KeepHost $keepHost)
+            if ($staleFed.Count -gt 0) {
+                Write-Host ""
+                Write-Host ("Removing stale federation-host SSL bindings (keeping " + $keepHost + ")...") -ForegroundColor Cyan
+                foreach ($b in $staleFed) {
+                    & netsh http delete sslcert hostnameport=$($b.Binding) 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) { Write-Host ("  Removed " + $b.Binding) -ForegroundColor Green }
+                    else { Write-Host ("  Failed to remove " + $b.Binding) -ForegroundColor Yellow }
+                }
+            }
+        }
+        catch {
+            Write-Warning "Stale federation-host binding cleanup failed: $($_.Exception.Message)"
+        }
     }
 }
 
