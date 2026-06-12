@@ -318,7 +318,7 @@ The script performs the following steps in order:
 5. **Prompts for (or accepts) the target ADFS hostname** — the FQDN the Federation Service will use after migration. Validated against the certificate SANs. Supply via `-TargetAdfsHostname` to skip the prompt.
 6. **Updates redirect URIs** on all ADFS native client applications.
 7. **Updates Federation Service Properties** (DisplayName, HostName, Identifier).
-8. **Resolves, lets you edit, and applies CORS Trusted Origins** — freshly resolves the full origin list from: the ADFS host (first); cert SANs matched by service label (`admin`, `dvr`, `device`, `explorer`, `lighthouse`, `wtiapi`, `wti`) for host-specific certs; the redirect URIs of all registered native apps (covers wildcard-cert deployments); `-Site` variants; and any `-CorsExtraOrigins`. This is a **clean replace** — the trusted-origin set becomes *exactly* this resolved list, so old/stale origins (and anything not re-derived) are removed. The list is shown in an **interactive editor** (unless `-NonInteractive`) where you can `add <url>`, `rm <n>`, apply (`y`), or skip (`n`), then written as a single string array via `Set-AdfsResponseHeaders -EnableCORS $true` in one call.
+8. **Resolves, lets you edit, and applies CORS Trusted Origins** — freshly resolves the full origin list from: the ADFS host (first); cert SANs matched by service label (`admin`, `dvr`, `device`, `explorer`, `lighthouse`, `wtiapi`, `wti`) for host-specific certs; the redirect URIs of all registered native apps (covers wildcard-cert deployments); site-coding when `-Site` is used (replacing the base/prior-site origin); and any `-CorsExtraOrigins`. This is a **clean replace** — the trusted-origin set becomes *exactly* this resolved list, so old/stale origins (and anything not re-derived) are removed. The list is shown in an **interactive editor** (unless `-NonInteractive`) where you can `add <url>`, `rm <n>`, apply (`y`), or skip (`n`), then written as a single string array via `Set-AdfsResponseHeaders -EnableCORS $true` in one call.
 9. **Binds the new certificate** as the ADFS Service Communications certificate and SSL certificate.
 10. **Restarts the ADFS service** and waits up to 60 seconds to confirm it comes back up.
 
@@ -395,7 +395,7 @@ The script will auto-detect the old and new host suffixes, prompt for the target
 
 Skips the interactive FQDN prompt and sets the Federation Service HostName, Identifier, and CORS origin directly from the provided value.
 
-### Also register site-coded app hosts (`-Site`)
+### Single-site deployment (`-Site`)
 
 ```powershell
 .\Install-ADFS-pfx-Redirects.ps1 `
@@ -403,17 +403,16 @@ Skips the interactive FQDN prompt and sets the Federation Service HostName, Iden
     -Site "home"
 ```
 
-With `-Site home` the script registers the `admin-home`, `dvr-home`, … app variants (redirect URIs **and** CORS origins) **and** site-codes the federation host itself to `auth-home.adfs.bn-wids.internal` (HostName / Identifier / DisplayName + its CORS origin). The base ADFS host is taken from the **current federation service host** and re-coded, so `-TargetAdfsHostname` is **not needed** with `-Site` (supply it only to point at a different/new base host, e.g. during a domain migration). Omit `-Site` to be prompted (blank = none).
+`-Site home` re-codes every app host to its `-home` form (`admin-home`, `dvr-home`, …) as both a redirect URI and a CORS origin, and site-codes the federation host to `auth-home.adfs.bn-wids.internal` (HostName / Identifier / DisplayName + its CORS origin).
 
-### Home-only deployment (`-Site` + `-SiteOnly`)
+The site host **replaces** the base everywhere — the named site is the **only** site that remains:
+- The base host (`admin`) is removed (not kept alongside).
+- Any **previously-deployed** site is stripped, so switching `home` → `office` leaves only `office` (no `admin-home` remnant, no `admin-home-office` stacking). The current site is detected from the live federation host.
+- A host already on the target site is left unchanged (idempotent — safe to re-run).
 
-```powershell
-.\Install-ADFS-pfx-Redirects.ps1 `
-    -PfxPath "C:\Temp\adfs-cert.pfx" `
-    -Site "home" -SiteOnly
-```
+The base ADFS host is taken from the **current federation service host** and re-coded, so `-TargetAdfsHostname` is **not needed** with `-Site` (supply it only to point at a different/new base host, e.g. during a domain migration). Omit `-Site` to be prompted (blank = none).
 
-By default `-Site` is **additive** (keeps `admin` *and* adds `admin-home`). Add **`-SiteOnly`** to make the site-coded host **replace** the base host everywhere — redirect URIs and CORS origins both become `admin-home`, `dvr-home`, … only, and the base `admin`/`dvr`/… entries are removed. Combined with the CORS clean-replace, this produces a clean, single-site deployment with no leftover base hosts. A host that is already site-coded is kept as-is (no double-coding). No effect without `-Site`.
+> `-SiteOnly` is **deprecated and ignored** — replacing the base host is now the default behavior of `-Site`. Existing commands that pass `-SiteOnly` still work (it just prints a note).
 
 > **Tips:** the old suffix is auto-detected as the domain shared by the **most** existing hosts (so a deeper federation-host suffix like `adfs.<domain>` won't be mistaken for the app-host domain) — override with `-OldHostSuffix` if needed. The base ADFS host defaults to the current federation host when `-TargetAdfsHostname` is omitted with `-Site`.
 
@@ -475,8 +474,8 @@ By default `-Site` is **additive** (keeps `admin` *and* adds `admin-home`). Add 
 | `-NewHostSuffix` | `string` | No | Replacement domain suffix. Auto-detected from the certificate SANs if omitted. |
 | `-TargetAdfsHostname` | `string` | No | The exact FQDN the ADFS service will use after migration (e.g. `wids-auth-adfs-abl17.newdomain.com`). Prompted interactively if omitted. Required when `-NonInteractive` is set, **unless** `-Site` is also used — with `-Site` it defaults to the current federation host (which the site code re-codes). |
 | `-ExpectedDnsName` | `string` | No | A specific DNS name that must appear in the certificate SAN or Subject CN. The script warns and prompts if it is absent. |
-| `-Site` | `string` | No | Site code. For every migrated app host, also registers a `<first-label>-<site>` variant (e.g. `admin` → `admin-<site>`) as **both** a redirect URI and a CORS origin, alongside the base host. The **ADFS/federation host is also site-coded** (`auth.adfs` → `auth-<site>.adfs`) — because it's a single host, that **replaces** HostName/Identifier/DisplayName + its CORS origin. The base host defaults to the current federation host (no `-TargetAdfsHostname` needed; supply it only to target a different/new base host). Add `-SiteOnly` to register the site-coded host *instead of* the base host. Prompted interactively if omitted; blank = none. |
-| `-SiteOnly` | `switch` | No | Only meaningful with `-Site`. Makes the site-coded host **replace** the base host in redirect URIs and CORS origins (so `admin` → `admin-<site>` only, base removed) instead of being added alongside it. Already site-coded hosts are kept as-is. |
+| `-Site` | `string` | No | Site code. Re-codes every app host to its `<first-label>-<site>` form (e.g. `admin` → `admin-<site>`) as **both** a redirect URI and a CORS origin, and site-codes the **ADFS/federation host** (`auth.adfs` → `auth-<site>.adfs`, replacing HostName/Identifier/DisplayName + its CORS origin). The site host **replaces** the base, and any previously-deployed site is **stripped** (current site detected from the live federation host), so only the named site remains — no base host, no stale site, no stacking; already-coded hosts are left unchanged (idempotent). The base ADFS host defaults to the current federation host (no `-TargetAdfsHostname` needed; supply it only to target a different/new base host). Prompted interactively if omitted; blank = none. |
+| `-SiteOnly` | `switch` | No | **Deprecated / no-op.** Replacing the base host is now the default behavior of `-Site`, so this is no longer needed. Accepted (prints a note) so existing commands don't break. |
 | `-CorsExtraOrigins` | `string` | No | Comma-separated list of additional origins to add to CORS trusted origins (merged with migrated origins). |
 | `-NoExportable` | `switch` | No | Import the certificate as non-exportable. Exportable by default. |
 | `-SkipServiceCommunications` | `switch` | No | Skip binding the new cert as the Service Communications certificate. |
@@ -576,8 +575,9 @@ Reads the existing ADFS CORS trusted origins and extracts the domain suffix from
 ## Important Notes
 
 - **The redirect URI set is replaced, not merged.** Each native app's redirect URIs are set to exactly the migrated list. Any existing URI that does not match the old suffix is not carried over. Review current registrations before running.
-- **CORS origins are a clean replace.** The trusted-origin set becomes *exactly* the freshly-resolved list (ADFS host + app hosts from SANs/redirect-URI discovery + `-Site` variants + `-CorsExtraOrigins`); existing origins are not merged back, so old/stale ones are removed. The list is shown in an interactive editor (`add <url>`, `rm <n>`, `y`/`n`) before being written; under `-NonInteractive` it is applied as-is. Add anything not auto-resolved via `-CorsExtraOrigins` or the editor.
-- **Redirect URIs are also a full replace** (per app): old-suffix hosts are migrated and the result overwrites the set, so old-domain redirects are dropped. Note: on a wildcard cert the script can't distinguish a *prior* `-Site` host (e.g. `admin-home`) from a base host, so switching site codes across runs may leave the previous site's redirect hosts — same-site re-runs and domain migrations stay clean.
+- **CORS origins are a clean replace.** The trusted-origin set becomes *exactly* the freshly-resolved list (ADFS host + app hosts from SANs/redirect-URI discovery, site-coded when `-Site` is used, + `-CorsExtraOrigins`); existing origins are not merged back, so old/stale ones are removed. The list is shown in an interactive editor (`add <url>`, `rm <n>`, `y`/`n`) before being written; under `-NonInteractive` it is applied as-is. Add anything not auto-resolved via `-CorsExtraOrigins` or the editor.
+- **Redirect URIs are also a full replace** (per app): old-suffix hosts are migrated and the result overwrites the set, so old-domain redirects are dropped.
+- **`-Site` keeps a single live site.** The site host replaces the base, and any previously-deployed site is stripped (the current site is detected from the live federation host), so switching site codes across runs (`home` → `office`) leaves only the new site — no base host, no stale site, no stacking. Re-running the same site is idempotent.
 - **Run on every ADFS node.** Certificate binding (`Set-AdfsCertificate`, `Set-AdfsSslCertificate`) must be applied on each node in the farm; the ADFS configuration changes (redirect URIs, CORS, properties) only need to run once.
 - **ADFS service restart is always performed** at the end of the script. Plan for a brief service interruption.
 - The script requires PowerShell to be running as Administrator. It will exit immediately if the privilege check fails.

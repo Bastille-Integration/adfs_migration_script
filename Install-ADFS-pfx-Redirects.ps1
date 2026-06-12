@@ -1,4 +1,4 @@
-# Version: 2.5
+# Version: 2.6
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
@@ -36,19 +36,18 @@ param(
 
     [string]$ExpectedDnsName,
 
-    # Optional site code. When supplied, for every migrated app host the script
-    # also registers a "<first-label>-<site>" variant (e.g. admin -> admin-<site>)
-    # as both a redirect URI and a CORS origin, alongside the base host. The
-    # ADFS/federation host is ALSO site-coded (auth.adfs -> auth-<site>.adfs): since
-    # the federation service is a single host, that REPLACES HostName/Identifier/
-    # DisplayName + its CORS origin (pass the base host via -TargetAdfsHostname).
-    # Prompted interactively if omitted; leave blank for none.
+    # Optional site code. When supplied, every app host is re-coded to its
+    # "<first-label>-<site>" form (e.g. admin -> admin-<site>) as both a redirect URI
+    # and a CORS origin, and the ADFS/federation host is site-coded too
+    # (auth.adfs -> auth-<site>.adfs). The site host REPLACES the base everywhere, and
+    # any previously-deployed site is stripped, so ONLY the named site is registered
+    # (no base host, no stale site left behind). Prompted interactively if omitted;
+    # leave blank for none.
     [string]$Site = '',
 
-    # When set together with -Site, the site-coded host REPLACES the base host
-    # everywhere (redirect URIs and CORS origins) instead of being registered
-    # alongside it. So -Site home -SiteOnly yields admin-home only (admin is
-    # removed), giving a clean "home"-only deployment. No effect without -Site.
+    # DEPRECATED / no-op. -Site now always replaces the base host (and any prior
+    # site), so this switch is no longer needed. Accepted so existing invocations
+    # do not break.
     [switch]$SiteOnly,
 
     [string]$CorsExtraOrigins = '',
@@ -76,7 +75,7 @@ param(
     [switch]$NonInteractive
 )
 
-$ScriptVersion = '2.5'
+$ScriptVersion = '2.6'
 
 function Stop-Script {
     param([string]$Message)
@@ -919,25 +918,47 @@ function Replace-SuffixInText {
     return ([Regex]::Replace($Text, $escapedOld, $NewSuffix, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase))
 }
 
+function Get-SiteCodeFromAdfsHost {
+    # Infer the currently-deployed site code from a federation hostname: the trailing
+    # hyphen segment of its first DNS label, when that label has more than one
+    # segment. auth-home.adfs.<d> -> 'home'; auth.adfs.<d> -> ''; the flat
+    # wids-auth-adfs-abl16.<d> -> 'abl16'. Used so a site switch strips the old site
+    # rather than stacking. Returns '' when no site can be inferred.
+    param([string]$Hostname)
+    if ([string]::IsNullOrWhiteSpace($Hostname)) { return '' }
+    $first = ($Hostname -split '\.')[0]
+    $segs = $first -split '-'
+    if ($segs.Count -lt 2) { return '' }
+    return $segs[-1]
+}
+
 function Add-SiteToHost {
-    # Append "-<Site>" to the first DNS label of a hostname:
-    # admin.bn-wids.internal + home -> admin-home.bn-wids.internal.
-    # Returns $null if no site, no host, or the label already carries the suffix.
-    param([string]$Hostname, [string]$Site)
+    # Set the first DNS label's site code to "-<Site>", removing an existing
+    # "-<CurrentSite>" suffix first so switching sites does not stack
+    # (admin-home + Site office, CurrentSite home -> admin-office). With no
+    # CurrentSite this is a plain append (admin -> admin-<Site>). Returns $null if
+    # no site/host, or the label already carries "-<Site>" (idempotent no-op signal).
+    param([string]$Hostname, [string]$Site, [string]$CurrentSite = '')
     if ([string]::IsNullOrWhiteSpace($Site) -or [string]::IsNullOrWhiteSpace($Hostname)) { return $null }
     $labels = $Hostname -split '\.'
     if ([string]::IsNullOrWhiteSpace($labels[0])) { return $null }
-    if ($labels[0] -match ('-' + [regex]::Escape($Site) + '$')) { return $null }
-    $labels[0] = $labels[0] + '-' + $Site
+    $first = $labels[0]
+    if ($first -match ('-' + [regex]::Escape($Site) + '$')) { return $null }
+    if (-not [string]::IsNullOrWhiteSpace($CurrentSite) -and
+        $CurrentSite -ne $Site -and
+        $first -match ('-' + [regex]::Escape($CurrentSite) + '$')) {
+        $first = $first.Substring(0, $first.Length - ($CurrentSite.Length + 1))
+    }
+    $labels[0] = $first + '-' + $Site
     return ($labels -join '.')
 }
 
 function Add-SiteToUri {
     # Site-code the host of a full URI, preserving scheme/path/port.
-    param([string]$UriString, [string]$Site)
+    param([string]$UriString, [string]$Site, [string]$CurrentSite = '')
     $u = $null
     if (-not [System.Uri]::TryCreate($UriString, [System.UriKind]::Absolute, [ref]$u)) { return $null }
-    $newHost = Add-SiteToHost -Hostname $u.Host -Site $Site
+    $newHost = Add-SiteToHost -Hostname $u.Host -Site $Site -CurrentSite $CurrentSite
     if ([string]::IsNullOrWhiteSpace($newHost)) { return $null }
     $b = New-Object System.UriBuilder($u)
     $b.Host = $newHost
@@ -951,8 +972,11 @@ function Build-ReplacedRedirectList {
         [string]$NewSuffix,
         [string[]]$SanNames = @(),
         [string]$Site = '',
-        # When set with -Site, register ONLY the site-coded host (replace the base
-        # host) instead of keeping both.
+        # The currently-deployed site code (inferred from the federation host), so a
+        # site switch strips it before applying the new one instead of stacking.
+        [string]$CurrentSite = '',
+        # Deprecated/no-op: -Site now always replaces the base host. Accepted so
+        # existing invocations do not break.
         [switch]$SiteOnly
     )
 
@@ -972,10 +996,12 @@ function Build-ReplacedRedirectList {
 
         if ([string]::IsNullOrWhiteSpace($migrated)) { continue }
 
-        if (-not [string]::IsNullOrWhiteSpace($Site) -and $SiteOnly) {
-            # Home-only: emit the site-coded host instead of the base. If the host
-            # is already site-coded (Add-SiteToUri returns null) keep it as-is.
-            $siteUri = Add-SiteToUri -UriString $migrated -Site $Site
+        # With a site code, the site host REPLACES the base host (and any prior site
+        # is stripped via CurrentSite), so only the named site is ever registered.
+        # Add-SiteToUri returns null when the host is already on the target site;
+        # keep it as-is in that case.
+        if (-not [string]::IsNullOrWhiteSpace($Site)) {
+            $siteUri = Add-SiteToUri -UriString $migrated -Site $Site -CurrentSite $CurrentSite
             $emit = if ([string]::IsNullOrWhiteSpace($siteUri)) { $migrated } else { $siteUri }
             if ($set.Add($emit)) { [void]$result.Add($emit) }
             continue
@@ -983,13 +1009,6 @@ function Build-ReplacedRedirectList {
 
         if ($set.Add($migrated)) {
             [void]$result.Add($migrated)
-        }
-        # Additive mode: also register the site-coded variant (admin -> admin-<site>).
-        if (-not [string]::IsNullOrWhiteSpace($Site)) {
-            $siteUri = Add-SiteToUri -UriString $migrated -Site $Site
-            if (-not [string]::IsNullOrWhiteSpace($siteUri) -and $set.Add($siteUri)) {
-                [void]$result.Add($siteUri)
-            }
         }
     }
 
@@ -1035,11 +1054,13 @@ function Update-NativeAppRedirects {
 
         [string]$Site = '',
 
+        [string]$CurrentSite = '',
+
         [switch]$SiteOnly
     )
 
     $current = @($AppInfo.RedirectUri)
-    $updated = Build-ReplacedRedirectList -ExistingRedirects $current -OldSuffix $OldSuffix -NewSuffix $NewSuffix -SanNames $SanNames -Site $Site -SiteOnly:$SiteOnly
+    $updated = Build-ReplacedRedirectList -ExistingRedirects $current -OldSuffix $OldSuffix -NewSuffix $NewSuffix -SanNames $SanNames -Site $Site -CurrentSite $CurrentSite
 
     Write-Host ""
     Write-Host "Application Group : $($AppInfo.GroupName)" -ForegroundColor DarkGray
@@ -1255,8 +1276,10 @@ function Resolve-AppCorsOrigins {
         [string]$NewSuffix = '',
         [string]$ParamExtraOrigins = '',
         [string]$Site = '',
-        # When set with -Site, the site-coded app origin REPLACES the base app
-        # origin instead of being added alongside it.
+        # Currently-deployed site code (from the federation host); a site switch
+        # strips it instead of stacking.
+        [string]$CurrentSite = '',
+        # Deprecated/no-op: -Site now always replaces the base app origin.
         [switch]$SiteOnly
     )
 
@@ -1341,40 +1364,25 @@ function Resolve-AppCorsOrigins {
     # ADFS host origin ($adfsOrigin) is excluded because the caller already passes
     # it site-coded (TargetAdfsHostname = effective host); skipping avoids double-coding.
     if (-not [string]::IsNullOrWhiteSpace($Site)) {
-        if ($SiteOnly) {
-            # Home-only: rebuild the set as the ADFS origin (already site-coded) plus
-            # the site-coded form of each app origin, dropping the base app origins.
-            $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
-            $set.Clear()
-            $result = New-Object 'System.Collections.Generic.List[string]'
-            if (-not [string]::IsNullOrWhiteSpace($adfsOrigin) -and $set.Add($adfsOrigin)) {
-                [void]$result.Add($adfsOrigin)
-            }
-            foreach ($o in $appOrigins) {
-                $parsed = $null
-                if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
-                $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site
-                # Already site-coded (returns null) -> keep the origin as-is.
-                $emitHost = if ([string]::IsNullOrWhiteSpace($siteHost)) { $parsed.Host } else { $siteHost }
-                $emit = $parsed.Scheme + '://' + $emitHost
-                if ($set.Add($emit)) {
-                    [void]$result.Add($emit)
-                    Write-Host "  + $emit  [site-only: $Site]" -ForegroundColor DarkCyan
-                }
-            }
+        # The site host REPLACES the base app origin (and any prior site is stripped
+        # via CurrentSite), so only the named site is registered. The ADFS origin is
+        # already on the effective (site-coded) host, so it is preserved as-is.
+        $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
+        $set.Clear()
+        $result = New-Object 'System.Collections.Generic.List[string]'
+        if (-not [string]::IsNullOrWhiteSpace($adfsOrigin) -and $set.Add($adfsOrigin)) {
+            [void]$result.Add($adfsOrigin)
         }
-        else {
-            $appOrigins = @($result | Where-Object { $_ -ne $adfsOrigin })
-            foreach ($o in $appOrigins) {
-                $parsed = $null
-                if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
-                $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site
-                if ([string]::IsNullOrWhiteSpace($siteHost)) { continue }
-                $siteOrigin = $parsed.Scheme + '://' + $siteHost
-                if ($set.Add($siteOrigin)) {
-                    [void]$result.Add($siteOrigin)
-                    Write-Host "  + $siteOrigin  [site: $Site]" -ForegroundColor DarkCyan
-                }
+        foreach ($o in $appOrigins) {
+            $parsed = $null
+            if (-not [System.Uri]::TryCreate($o, [System.UriKind]::Absolute, [ref]$parsed)) { continue }
+            $siteHost = Add-SiteToHost -Hostname $parsed.Host -Site $Site -CurrentSite $CurrentSite
+            # Already on the target site (returns null) -> keep the origin as-is.
+            $emitHost = if ([string]::IsNullOrWhiteSpace($siteHost)) { $parsed.Host } else { $siteHost }
+            $emit = $parsed.Scheme + '://' + $emitHost
+            if ($set.Add($emit)) {
+                [void]$result.Add($emit)
+                Write-Host "  + $emit  [site: $Site]" -ForegroundColor DarkCyan
             }
         }
     }
@@ -1722,8 +1730,13 @@ Write-Host "  New: $NewHostSuffix"
 # the base host). Resolved before the ADFS hostname so it can drive the default
 # below.
 if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Site')) {
-    $resp = (Read-Host "Optional site code to also register <app>-<site> hosts (blank = none)").Trim()
+    $resp = (Read-Host "Optional site code (replaces base/other-site app hosts; blank = none)").Trim()
     if (-not [string]::IsNullOrWhiteSpace($resp)) { $Site = $resp }
+}
+
+if ($PSBoundParameters.ContainsKey('SiteOnly')) {
+    Write-Host ""
+    Write-Host "Note: -SiteOnly is deprecated and ignored; -Site now always replaces the base host (and any prior site)." -ForegroundColor Yellow
 }
 
 # Record the current federation hostname BEFORE any change. Used as (a) the default
@@ -1733,6 +1746,11 @@ if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Site')) {
 # the same cert).
 $previousAdfsHostname = $null
 try { $previousAdfsHostname = (Get-AdfsProperties -ErrorAction Stop).HostName } catch {}
+
+# The site code currently deployed (inferred from the live federation host). When a
+# different -Site is given, this lets the script STRIP the old site instead of
+# stacking it, so a site switch never leaves the previous site's hosts behind.
+$CurrentSite = Get-SiteCodeFromAdfsHost -Hostname $previousAdfsHostname
 
 # With -Site, the base ADFS host defaults to the current federation host (which the
 # site code then re-codes), so -TargetAdfsHostname is optional. Without -Site it is
@@ -1756,13 +1774,16 @@ Write-Host ""
 Write-Host "Target ADFS hostname : $TargetAdfsHostname" -ForegroundColor Cyan
 
 # When a site code is given, the ADFS/federation host is site-coded like the app
-# hosts: auth.adfs.<domain> -> auth-<site>.adfs.<domain>. The federation service is
-# a single host, so this REPLACES the host (HostName/Identifier/DisplayName + its
-# CORS origin) rather than adding a sibling.
+# hosts: auth.adfs.<domain> -> auth-<site>.adfs.<domain>. The site host REPLACES the
+# base everywhere (HostName/Identifier/DisplayName + redirects + CORS), and any prior
+# site is stripped (via CurrentSite), so only the named site is ever registered.
 $effectiveAdfsHostname = $TargetAdfsHostname
 if (-not [string]::IsNullOrWhiteSpace($Site)) {
-    Write-Host "Site code            : $Site  (adds <app>-$Site hosts)" -ForegroundColor Cyan
-    $codedAdfs = Add-SiteToHost -Hostname $TargetAdfsHostname -Site $Site
+    Write-Host "Site code            : $Site  (only <app>-$Site hosts; base/other-site removed)" -ForegroundColor Cyan
+    if (-not [string]::IsNullOrWhiteSpace($CurrentSite) -and $CurrentSite -ne $Site) {
+        Write-Host "Replacing current site: $CurrentSite -> $Site" -ForegroundColor Cyan
+    }
+    $codedAdfs = Add-SiteToHost -Hostname $TargetAdfsHostname -Site $Site -CurrentSite $CurrentSite
     if (-not [string]::IsNullOrWhiteSpace($codedAdfs)) {
         $effectiveAdfsHostname = $codedAdfs
         Write-Host "ADFS host (site-coded): $effectiveAdfsHostname" -ForegroundColor Cyan
@@ -1818,7 +1839,7 @@ else {
     }
 
     foreach ($app in $toProcess) {
-        Update-NativeAppRedirects -AppInfo $app -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames -Site $Site -SiteOnly:$SiteOnly
+        Update-NativeAppRedirects -AppInfo $app -OldSuffix $OldHostSuffix -NewSuffix $NewHostSuffix -SanNames $certSanNames -Site $Site -CurrentSite $CurrentSite
     }
 }
 
@@ -1842,7 +1863,7 @@ if (-not $SkipCors) {
         -NewSuffix $NewHostSuffix `
         -ParamExtraOrigins $CorsExtraOrigins `
         -Site $Site `
-        -SiteOnly:$SiteOnly)
+        -CurrentSite $CurrentSite)
 
     Update-CorsTrustedOrigins `
         -OldSuffix $OldHostSuffix `

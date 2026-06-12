@@ -247,7 +247,12 @@ foreach ($s in $scenarios) {
     $fedMatch = Test-CertificateNameMatch -Cert $certLike -ExpectedName $s.ExplicitFedHost
     Assert ("cert covers federation host " + $s.ExplicitFedHost) ([bool]$fedMatch.IsMatch) ("matchedBy: " + ($fedMatch.MatchedBy -join ', '))
 
-    # --- Build-ReplacedRedirectList: full-replace + -Site coding ---
+    # --- Build-ReplacedRedirectList: -Site now REPLACES the base host by default ---
+    # Expected site host is built with the shipped Add-SiteToHost (codes the FIRST
+    # DNS label, e.g. admin -> admin-site9 / wids-admin-lab16 -> wids-admin-lab16-site9).
+    $adminBase = ("https://" + $s.AppMap['admin'] + "/adfs/oauth/callback")
+    $adminSite = ("https://" + (Add-SiteToHost -Hostname $s.AppMap['admin'] -Site 'site9') + "/adfs/oauth/callback")
+
     $existing = @(
         "https://admin.$OldSuffix/adfs/oauth/callback",
         "https://wti.$OldSuffix/cb",
@@ -256,27 +261,12 @@ foreach ($s in $scenarios) {
     # The shipped function returns a comma-wrapped array (keeps single-item results
     # as arrays for Set-AdfsNativeClientApplication); pipe through to flatten it.
     $rebuilt = Build-ReplacedRedirectList -ExistingRedirects $existing -OldSuffix $OldSuffix -SanNames $sans -Site 'site9' | ForEach-Object { $_ }
-    $adminBase = ("https://" + $s.AppMap['admin'] + "/adfs/oauth/callback")
-    $adminSite = $adminBase -replace [regex]::Escape($s.AppMap['admin']), (Add-SiteToHost -Hostname $s.AppMap['admin'] -Site 'site9')
-    Assert "rebuilt redirects contain the migrated base admin URI"  ($rebuilt -contains $adminBase) ("have: " + ($rebuilt -join ' | '))
-    Assert "rebuilt redirects contain the site-coded admin URI"     ($rebuilt -contains $adminSite) ("have: " + ($rebuilt -join ' | '))
-    # No old-domain hosts survive (full replace) and nothing is double site-coded.
+    Assert "[-Site] contains the site-coded admin URI"      ($rebuilt -contains $adminSite) ("have: " + ($rebuilt -join ' | '))
+    Assert "[-Site] base admin URI is REPLACED (not kept)"  (-not ($rebuilt -contains $adminBase)) ("have: " + ($rebuilt -join ' | '))
     $leakedOld = @($rebuilt | Where-Object { $_ -match [regex]::Escape($OldSuffix) })
-    Assert "no old-suffix hosts remain in rebuilt redirects" ($leakedOld.Count -eq 0) ("leaked: " + ($leakedOld -join ' | '))
-    $doubleCoded = @($rebuilt | Where-Object { $_ -match 'site9-site9|-site9-site9' })
-    Assert "no host is double site-coded" ($doubleCoded.Count -eq 0) ("double: " + ($doubleCoded -join ' | '))
-
-    # --- Build-ReplacedRedirectList: -SiteOnly (home-only) drops the base host ---
-    # Feed both a base host and an already-site-coded host; expect only site-coded out.
-    $existingHomeOnly = @(
-        "https://admin.$OldSuffix/adfs/oauth/callback",
-        ("https://" + (Add-SiteToHost -Hostname $s.AppMap['admin'] -Site 'site9') + "/adfs/oauth/callback")
-    )
-    $siteOnly = Build-ReplacedRedirectList -ExistingRedirects $existingHomeOnly -OldSuffix $OldSuffix -SanNames $sans -Site 'site9' -SiteOnly | ForEach-Object { $_ }
-    Assert "[-SiteOnly] contains the site-coded admin URI" ($siteOnly -contains $adminSite) ("have: " + ($siteOnly -join ' | '))
-    Assert "[-SiteOnly] base admin URI is removed"         (-not ($siteOnly -contains $adminBase)) ("have: " + ($siteOnly -join ' | '))
-    $soDouble = @($siteOnly | Where-Object { $_ -match 'site9-site9' })
-    Assert "[-SiteOnly] no double site-coding"             ($soDouble.Count -eq 0) ("double: " + ($soDouble -join ' | '))
+    Assert "[-Site] no old-suffix hosts remain"             ($leakedOld.Count -eq 0) ("leaked: " + ($leakedOld -join ' | '))
+    $doubleCoded = @($rebuilt | Where-Object { $_ -match 'site9-site9' })
+    Assert "[-Site] no host is double site-coded"           ($doubleCoded.Count -eq 0) ("double: " + ($doubleCoded -join ' | '))
 }
 
 Write-Host ""
@@ -296,6 +286,31 @@ Assert "base + home + adfs -> base domain" ($suffix2 -eq 'bn-wids.internal') ("g
 # A flat single-domain set resolves to that domain.
 $suffix3 = Get-MostCommonHostSuffix -Hosts @('wids-admin-lab16.oraphys-lab.example','wids-dvr-lab16.oraphys-lab.example')
 Assert "flat hosts -> shared domain" ($suffix3 -eq 'oraphys-lab.example') ("got: '$suffix3'")
+
+Write-Host ""
+Write-Host "===== Site re-coding (replace base / idempotent / switch) =====" -ForegroundColor Magenta
+# Wildcard domain so any host under it resolves (a flat cert has no site-coded SANs).
+$wsan = @('bn-wids.internal', '*.bn-wids.internal')
+$wsuf = 'bn-wids.internal'
+
+# Current-site detection from the federation host.
+Assert "site from auth-home.adfs.<d> = home"  ((Get-SiteCodeFromAdfsHost -Hostname 'auth-home.adfs.bn-wids.internal') -eq 'home') ''
+Assert "site from auth.adfs.<d> = (none)"      ([string]::IsNullOrEmpty((Get-SiteCodeFromAdfsHost -Hostname 'auth.adfs.bn-wids.internal'))) ''
+Assert "site from wids-auth-adfs-abl16.<d> = abl16" ((Get-SiteCodeFromAdfsHost -Hostname 'wids-auth-adfs-abl16.oraphys-lab.example') -eq 'abl16') ''
+
+# Base -> site: base host replaced, only the site host remains.
+$r1 = Build-ReplacedRedirectList -ExistingRedirects @('https://admin.bn-wids.internal/cb') -OldSuffix $wsuf -SanNames $wsan -Site 'home' | ForEach-Object { $_ }
+Assert "base -> home: site host present"       ($r1 -contains 'https://admin-home.bn-wids.internal/cb') ("have: " + ($r1 -join ' | '))
+Assert "base -> home: base removed"            (-not ($r1 -contains 'https://admin.bn-wids.internal/cb')) ("have: " + ($r1 -join ' | '))
+
+# Idempotent: already on 'home', deploy 'home' again -> unchanged, single entry.
+$r2 = Build-ReplacedRedirectList -ExistingRedirects @('https://admin-home.bn-wids.internal/cb') -OldSuffix $wsuf -SanNames $wsan -Site 'home' -CurrentSite 'home' | ForEach-Object { $_ }
+Assert "home -> home idempotent (single host)" (@($r2).Count -eq 1 -and $r2 -contains 'https://admin-home.bn-wids.internal/cb') ("have: " + ($r2 -join ' | '))
+
+# Switch: on 'home', deploy 'office' (CurrentSite home) -> only office, no home left.
+$r3 = Build-ReplacedRedirectList -ExistingRedirects @('https://admin-home.bn-wids.internal/cb') -OldSuffix $wsuf -SanNames $wsan -Site 'office' -CurrentSite 'home' | ForEach-Object { $_ }
+Assert "home -> office: office host present"   ($r3 -contains 'https://admin-office.bn-wids.internal/cb') ("have: " + ($r3 -join ' | '))
+Assert "home -> office: home stripped (no remnant/stacking)" (@($r3 | Where-Object { $_ -match 'home' }).Count -eq 0) ("have: " + ($r3 -join ' | '))
 
 Write-Host ""
 $color = if ($script:Fail -eq 0) { 'Green' } else { 'Red' }
