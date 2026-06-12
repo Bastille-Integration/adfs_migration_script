@@ -1,10 +1,15 @@
-# Version: 1.0
-# Test suite for the -Site feature of Install-ADFS-pfx-Redirects.ps1.
+# Version: 1.1
+# Live, self-restoring test for the -Site feature of Install-ADFS-pfx-Redirects.ps1.
 #
 # Loads the shipped functions from the migration script (without running the
 # migration), applies a -Site code to the LIVE ADFS native-app redirect URIs and
 # CORS origins, prints before/after, runs PASS/FAIL assertions, then restores the
 # exact pre-existing state in a finally block (runs even if an assertion throws).
+#
+# -Site semantics (v2.6+): the site host REPLACES the base, and any currently-
+# deployed site (detected from the federation host) is stripped - so this test
+# asserts the site-coded host is PRESENT, the prior host is REMOVED, the redirect
+# count is unchanged (1:1 re-code, not additive), and nothing is double/stacked.
 #
 # It does NOT touch certificates, Federation Service properties, or restart ADFS.
 #
@@ -58,23 +63,33 @@ function Assert {
     else            { Write-Host ("  [FAIL] " + $Name) -ForegroundColor Red;   $script:Fail++ }
 }
 
-# Independent expectation builders (not the shipped Add-SiteTo* - so the test
-# verifies behavior rather than just re-deriving from the implementation).
+# Independent expectation builders (NOT the shipped Add-SiteTo* - so the test
+# verifies behavior rather than just re-deriving from the implementation). Mirrors
+# the v2.6+ replace semantics: strip a current-site suffix, then apply the new site;
+# a host already on the target site is unchanged.
+function Expect-SiteHost {
+    param([string]$Hostname, [string]$Site, [string]$CurrentSite = '')
+    $labels = $Hostname -split '\.'
+    $first = $labels[0]
+    if ($first -match ('-' + [regex]::Escape($Site) + '$')) { return $Hostname }   # already target site
+    if (-not [string]::IsNullOrWhiteSpace($CurrentSite) -and $CurrentSite -ne $Site -and
+        $first -match ('-' + [regex]::Escape($CurrentSite) + '$')) {
+        $first = $first.Substring(0, $first.Length - ($CurrentSite.Length + 1))
+    }
+    $labels[0] = $first + '-' + $Site
+    return ($labels -join '.')
+}
 function Expect-SiteUri {
-    param([string]$Uri, [string]$Site)
+    param([string]$Uri, [string]$Site, [string]$CurrentSite = '')
     $u = [System.Uri]$Uri
-    $labels = $u.Host -split '\.'
-    $labels[0] = $labels[0] + '-' + $Site
     $b = New-Object System.UriBuilder($u)
-    $b.Host = ($labels -join '.')
+    $b.Host = (Expect-SiteHost -Hostname $u.Host -Site $Site -CurrentSite $CurrentSite)
     return $b.Uri.AbsoluteUri
 }
 function Expect-SiteOrigin {
-    param([string]$Origin, [string]$Site)
+    param([string]$Origin, [string]$Site, [string]$CurrentSite = '')
     $u = [System.Uri]$Origin
-    $labels = $u.Host -split '\.'
-    $labels[0] = $labels[0] + '-' + $Site
-    return ($u.Scheme + '://' + ($labels -join '.'))
+    return ($u.Scheme + '://' + (Expect-SiteHost -Hostname $u.Host -Site $Site -CurrentSite $CurrentSite))
 }
 
 function Get-NativeAppMap {
@@ -102,8 +117,6 @@ function Show-State {
     Write-Host ("   HostName            : " + $p.HostName)
     Write-Host ("   Identifier          : " + $p.Identifier)
     Write-Host ("   DisplayName         : " + $p.DisplayName)
-    Write-Host ("   AutoCertRollover    : " + $p.AutoCertificateRollover)
-    Write-Host ("   CertificateDuration : " + $p.CertificateDuration)
 
     Write-Host "-- Application Groups --" -ForegroundColor White
     foreach ($g in (Get-AdfsApplicationGroup | Sort-Object Name)) {
@@ -112,21 +125,12 @@ function Show-State {
             Write-Host ("     Native : " + $a.Name + "   (ClientId " + $a.Identifier + ")")
             @($a.RedirectUri) | Sort-Object | ForEach-Object { Write-Host ("        redirect : " + $_) }
         }
-        foreach ($w in @(Get-AdfsWebApiApplication -ApplicationGroupIdentifier $g.ApplicationGroupIdentifier -ErrorAction SilentlyContinue)) {
-            Write-Host ("     WebAPI : " + $w.Name + "   (AccessControlPolicy: " + $w.AccessControlPolicyName + ")")
-            @($w.Identifier) | ForEach-Object { Write-Host ("        identifier : " + $_) }
-        }
     }
 
     Write-Host "-- CORS (Response Headers) --" -ForegroundColor White
     $h = Get-AdfsResponseHeaders
     Write-Host ("   CORSEnabled : " + $h.CORSEnabled + "   (origins: " + @($h.CORSTrustedOrigins).Count + ")")
     @($h.CORSTrustedOrigins) | Sort-Object | ForEach-Object { Write-Host ("        origin : " + $_) }
-
-    Write-Host "-- Certificates --" -ForegroundColor White
-    Get-AdfsCertificate | Sort-Object CertificateType | ForEach-Object {
-        Write-Host ("   " + $_.CertificateType + " : " + $_.Thumbprint + "   IsPrimary=" + $_.IsPrimary)
-    }
 
     Write-Host "-- SSL Bindings --" -ForegroundColor White
     Get-AdfsSslCertificate | Sort-Object HostName, PortNumber | ForEach-Object {
@@ -142,9 +146,11 @@ $suffix   = Get-NewHostSuffixFromCertificateWildcardSan -Cert $cert
 if ([string]::IsNullOrWhiteSpace($suffix)) { $suffix = Get-NewHostSuffixFromCertificateSans -Cert $cert }
 $adfsHost = (Get-AdfsProperties).HostName.ToLowerInvariant()
 $adfsOrigin = "https://" + $adfsHost
-# -Site site-codes the federation host too (auth.adfs -> auth-<site>.adfs), matching
-# the main script. The federation host is singular, so it is replaced (not base+variant).
-$effectiveAdfsHost   = Add-SiteToHost -Hostname $adfsHost -Site $Site
+# The site currently deployed (inferred from the federation host), so the test
+# re-codes home -> <Site> by stripping the old site rather than stacking it.
+$currentSite = Get-SiteCodeFromAdfsHost -Hostname $adfsHost
+# -Site site-codes the federation host too (replacing it, since it is singular).
+$effectiveAdfsHost = Add-SiteToHost -Hostname $adfsHost -Site $Site -CurrentSite $currentSite
 if ([string]::IsNullOrWhiteSpace($effectiveAdfsHost)) { $effectiveAdfsHost = $adfsHost }
 $effectiveAdfsOrigin = "https://" + $effectiveAdfsHost
 
@@ -152,7 +158,8 @@ Write-Host ""
 Write-Host "================ Test: -Site '$Site' ================" -ForegroundColor Cyan
 Write-Host ("  Suffix             : " + $suffix)
 Write-Host ("  ADFS host          : " + $adfsHost)
-Write-Host ("  ADFS host (coded)  : " + $effectiveAdfsHost + "   (federation host is site-coded)")
+Write-Host ("  Current site       : " + $(if ($currentSite) { $currentSite } else { '(none)' }))
+Write-Host ("  ADFS host (coded)  : " + $effectiveAdfsHost + "   (federation host is site-coded / replaced)")
 Write-Host ("  Cert SANs          : " + ($sans -join ', '))
 
 # --- Capture baseline ---
@@ -171,10 +178,10 @@ try {
     # 6>$null suppresses the migration functions' own Write-Host progress so the
     # three Show-State snapshots stay clean. Return values still flow normally.
     foreach ($e in $baseApps) {
-        $new = Build-ReplacedRedirectList -ExistingRedirects $e.Uris -OldSuffix $suffix -NewSuffix $suffix -SanNames $sans -Site $Site
+        $new = Build-ReplacedRedirectList -ExistingRedirects $e.Uris -OldSuffix $suffix -NewSuffix $suffix -SanNames $sans -Site $Site -CurrentSite $currentSite
         Set-AdfsNativeClientApplication -TargetApplication (Get-NativeApp -Id $e.Id) -RedirectUri $new -ErrorAction Stop
     }
-    $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $effectiveAdfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site 6>$null)
+    $proposed = @(Resolve-AppCorsOrigins -SanNames $sans -TargetAdfsHostname $effectiveAdfsHost -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -Site $Site -CurrentSite $currentSite 6>$null)
     Update-CorsTrustedOrigins -OldSuffix $suffix -NewSuffix $suffix -ParamExtraOrigins '' -SanNames $sans -TargetAdfsHostname $effectiveAdfsHost -ProposedOrigins $proposed 6>$null
 
     # ===== MODIFIED (SITE) ENVIRONMENT =====
@@ -186,26 +193,41 @@ try {
     Write-Host ""
     Write-Host "---------------- ASSERTIONS ----------------" -ForegroundColor Cyan
 
-    Write-Host "Redirect URIs:"
+    Write-Host "Redirect URIs (site host replaces base/prior-site, 1:1):"
     foreach ($e in $baseApps) {
         $a = $afterApps | Where-Object { $_.Id -eq $e.Id } | Select-Object -First 1
+        Assert ("redirect count unchanged : " + $e.Name) (@($a.Uris).Count -eq @($e.Uris).Count)
         foreach ($u in $e.Uris) {
-            Assert ("base preserved : " + $u) ($a.Uris -contains $u)
-            Assert ("site variant   : " + (Expect-SiteUri -Uri $u -Site $Site)) ($a.Uris -contains (Expect-SiteUri -Uri $u -Site $Site))
+            $exp = Expect-SiteUri -Uri $u -Site $Site -CurrentSite $currentSite
+            Assert ("site host present : " + $exp) ($a.Uris -contains $exp)
+            if ($exp -ne $u) {
+                Assert ("prior host replaced : " + $u) (-not ($a.Uris -contains $u))
+            }
         }
     }
 
     Write-Host "CORS origins:"
+    Assert ("CORS origin count unchanged") (@($afterCors).Count -eq @($baseCors).Count)
     foreach ($o in $baseCors) {
         if ($o -eq $adfsOrigin) { continue }   # federation host handled separately below
-        Assert ("base preserved : " + $o) ($afterCors -contains $o)
-        $exp = Expect-SiteOrigin -Origin $o -Site $Site
-        Assert ("site variant   : " + $exp) ($afterCors -contains $exp)
+        $exp = Expect-SiteOrigin -Origin $o -Site $Site -CurrentSite $currentSite
+        Assert ("site origin present : " + $exp) ($afterCors -contains $exp)
+        if ($exp -ne $o) {
+            Assert ("prior origin replaced : " + $o) (-not ($afterCors -contains $o))
+        }
     }
-    # Federation host: site-coded form present (replaces the base), and not double-coded.
+    # Federation host: site-coded form present (replaces the base).
     Assert ("ADFS host site-coded present : " + $effectiveAdfsOrigin) ($afterCors -contains $effectiveAdfsOrigin)
-    $doubleCoded = Expect-SiteOrigin -Origin $effectiveAdfsOrigin -Site $Site
-    Assert ("ADFS host not double-coded ($doubleCoded absent)") (-not ($afterCors -contains $doubleCoded))
+    # Nothing double/stacked: no host carries -<Site>-<Site> or -<currentSite>-<Site>.
+    $stackPatterns = @(("-" + $Site + "-" + $Site))
+    if ($currentSite -and $currentSite -ne $Site) { $stackPatterns += ("-" + $currentSite + "-" + $Site) }
+    $stacked = @($afterCors | Where-Object { $h = ([System.Uri]$_).Host; ($stackPatterns | Where-Object { $h -match [regex]::Escape($_) }) })
+    Assert ("no double/stacked site coding in CORS") ($stacked.Count -eq 0)
+    # Prior site fully gone (when switching sites).
+    if ($currentSite -and $currentSite -ne $Site) {
+        $remnant = @($afterCors | Where-Object { ([System.Uri]$_).Host -match ('-' + [regex]::Escape($currentSite) + '(\.|$)') })
+        Assert ("prior site '$currentSite' fully removed from CORS") ($remnant.Count -eq 0)
+    }
 }
 finally {
     # ===== CLEANUP: restore exact baseline =====
