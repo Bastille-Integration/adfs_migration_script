@@ -1,4 +1,4 @@
-# Version: 2.4
+# Version: 2.5
 # Requires: Run as Administrator on an ADFS node with the ADFS PowerShell module
 # Example:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx"
@@ -6,7 +6,7 @@
 # Optional overrides:
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -OldHostSuffix "bn.nga.mil" -NewHostSuffix "rta.fak"
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "wids-auth-adfs-abl17.newdomain.com"
-#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -TargetAdfsHostname "auth-home.adfs.bn-wids.internal" -Site "home"
+#   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -Site "home" -SiteOnly   (ADFS host derived from current federation host)
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -PfxPath "C:\Temp\adfs-cert.pfx" -EnableUpdatePassword -TokenCertificateDuration 1825
 #   .\Invoke-AdfsCertAndSuffixMigration.ps1 -Version   (or -v)  -> print version and exit
 
@@ -27,9 +27,11 @@ param(
     [string]$NewHostSuffix,
 
     # The desired FQDN for the ADFS service (e.g. "wids-auth-adfs-abl17.newdomain.com").
-    # If not supplied the script will prompt interactively. This value is used directly for
-    # the Federation Service HostName, Identifier, and CORS origin rather than being derived
-    # from heuristics, so it must be an exact hostname that exists in the certificate SANs.
+    # Used directly for the Federation Service HostName, Identifier, and CORS origin, so it
+    # must be an exact hostname that exists in the certificate SANs.
+    # OPTIONAL with -Site: it then defaults to the current federation host, which the site
+    # code re-codes (auth.adfs -> auth-<site>.adfs). Without -Site it is required (a domain
+    # migration must state the new host); the script prompts interactively if omitted.
     [string]$TargetAdfsHostname,
 
     [string]$ExpectedDnsName,
@@ -74,7 +76,7 @@ param(
     [switch]$NonInteractive
 )
 
-$ScriptVersion = '2.4'
+$ScriptVersion = '2.5'
 
 function Stop-Script {
     param([string]$Message)
@@ -1716,6 +1718,33 @@ Write-Host "Suffix mapping:" -ForegroundColor Cyan
 Write-Host "  Old: $OldHostSuffix"
 Write-Host "  New: $NewHostSuffix"
 
+# Optional site code: registers <app>-<site> hosts (and, with -SiteOnly, replaces
+# the base host). Resolved before the ADFS hostname so it can drive the default
+# below.
+if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Site')) {
+    $resp = (Read-Host "Optional site code to also register <app>-<site> hosts (blank = none)").Trim()
+    if (-not [string]::IsNullOrWhiteSpace($resp)) { $Site = $resp }
+}
+
+# Record the current federation hostname BEFORE any change. Used as (a) the default
+# base ADFS host when -Site is given without -TargetAdfsHostname, and (b) the old
+# host for stale HTTP.SYS SSL-binding cleanup after a hostname-only change (the
+# thumbprint-based sweep below only catches OLD-CERT bindings, not an old host on
+# the same cert).
+$previousAdfsHostname = $null
+try { $previousAdfsHostname = (Get-AdfsProperties -ErrorAction Stop).HostName } catch {}
+
+# With -Site, the base ADFS host defaults to the current federation host (which the
+# site code then re-codes), so -TargetAdfsHostname is optional. Without -Site it is
+# still required: a domain migration must state the new ADFS host explicitly.
+if (-not [string]::IsNullOrWhiteSpace($Site) -and
+    [string]::IsNullOrWhiteSpace($TargetAdfsHostname) -and
+    -not [string]::IsNullOrWhiteSpace($previousAdfsHostname)) {
+    $TargetAdfsHostname = $previousAdfsHostname
+    Write-Host ""
+    Write-Host "No -TargetAdfsHostname given; using the current federation host as the base: $TargetAdfsHostname" -ForegroundColor Cyan
+}
+
 # Prompt (or accept) the desired ADFS FQDN before asking the operator to confirm.
 # This is collected early so it appears in the confirmation summary.
 $TargetAdfsHostname = Get-TargetAdfsHostname `
@@ -1726,16 +1755,10 @@ $TargetAdfsHostname = Get-TargetAdfsHostname `
 Write-Host ""
 Write-Host "Target ADFS hostname : $TargetAdfsHostname" -ForegroundColor Cyan
 
-# Optional site code: also registers <app>-<site> redirect URIs / CORS origins.
-if (-not $NonInteractive -and -not $PSBoundParameters.ContainsKey('Site')) {
-    $resp = (Read-Host "Optional site code to also register <app>-<site> hosts (blank = none)").Trim()
-    if (-not [string]::IsNullOrWhiteSpace($resp)) { $Site = $resp }
-}
-
 # When a site code is given, the ADFS/federation host is site-coded like the app
 # hosts: auth.adfs.<domain> -> auth-<site>.adfs.<domain>. The federation service is
 # a single host, so this REPLACES the host (HostName/Identifier/DisplayName + its
-# CORS origin) rather than adding a sibling. Pass the base host via -TargetAdfsHostname.
+# CORS origin) rather than adding a sibling.
 $effectiveAdfsHostname = $TargetAdfsHostname
 if (-not [string]::IsNullOrWhiteSpace($Site)) {
     Write-Host "Site code            : $Site  (adds <app>-$Site hosts)" -ForegroundColor Cyan
@@ -1745,13 +1768,6 @@ if (-not [string]::IsNullOrWhiteSpace($Site)) {
         Write-Host "ADFS host (site-coded): $effectiveAdfsHostname" -ForegroundColor Cyan
     }
 }
-
-# Record the federation hostname BEFORE it is changed, so a hostname-only change
-# (e.g. -Site, where the cert thumbprint does not change) can clean up the old
-# host's stale HTTP.SYS SSL binding afterward. The thumbprint-based stale sweep
-# below only catches OLD-CERT bindings, not an old host on the same cert.
-$previousAdfsHostname = $null
-try { $previousAdfsHostname = (Get-AdfsProperties -ErrorAction Stop).HostName } catch {}
 
 if (-not $NonInteractive) {
     if (-not (Confirm-Action "Proceed with certificate binding and suffix replacement? (y/n)")) {
