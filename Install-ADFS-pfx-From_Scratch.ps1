@@ -1,4 +1,4 @@
-# Version: 2.0
+# Version: 2.1
 # Requires: Run as Administrator on the target node
 # Deploys a fresh ADFS configuration using a PFX certificate.
 # Examples:
@@ -212,11 +212,20 @@ function Get-NewHostSuffixFromSans {
     $splitNames = [System.Collections.Generic.List[string[]]]::new()
     foreach ($name in $DnsNames) { $splitNames.Add(@($name -split '\.')) }
 
+    # Prefer the SHORTEST wildcard suffix (fewest labels). A cert may carry several
+    # wildcards (e.g. *.bn-wids.internal AND *.adfs.bn-wids.internal); the base
+    # registrable domain is the shortest, so a deeper *.adfs.<domain> does not win.
+    $wildSuffixes = @()
     foreach ($labels in $splitNames) {
         if ($labels[0] -eq '*') {
             $suffix = ($labels | Select-Object -Skip 1) -join '.'
-            if (-not [string]::IsNullOrWhiteSpace($suffix)) { return $suffix }
+            if (-not [string]::IsNullOrWhiteSpace($suffix)) { $wildSuffixes += $suffix }
         }
+    }
+    if ($wildSuffixes.Count -gt 0) {
+        return ($wildSuffixes |
+            Sort-Object @{ Expression = { ($_ -split '\.').Count } }, @{ Expression = { $_.Length } } |
+            Select-Object -First 1)
     }
 
     $minLabels = ($splitNames | ForEach-Object { $_.Count } | Measure-Object -Minimum).Minimum
@@ -241,7 +250,10 @@ function Resolve-HostnameFromSans {
     $bestMatch = $null
     $bestScore = -1
 
+    # Literal match: the label appears as a hyphen segment of a SAN's first label
+    # (flat per-host certs, e.g. admin -> wids-admin-abl16.<domain>).
     foreach ($san in $SanNames) {
+        if ($san.StartsWith('*.')) { continue }
         $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
         $segments   = @($firstLabel -split '-')
         if ($segments -contains $label) {
@@ -249,16 +261,28 @@ function Resolve-HostnameFromSans {
             if ($score -gt $bestScore) { $bestScore = $score; $bestMatch = $san }
         }
     }
+
+    # Wildcard fallback: a wildcard cert (e.g. *.bn-wids.internal) has no per-app
+    # SAN, so pair the label with the SHORTEST wildcard's domain -> admin.bn-wids.internal.
+    # Shortest avoids a deeper *.adfs.<domain> splicing an extra label into app hosts.
+    if ([string]::IsNullOrWhiteSpace($bestMatch)) {
+        $wild = @($SanNames | Where-Object { $_.StartsWith('*.') } |
+            Sort-Object @{ Expression = { ($_ -split '\.').Count } }, @{ Expression = { $_.Length } })
+        if ($wild.Count -gt 0) { $bestMatch = $label + '.' + $wild[0].Substring(2) }
+    }
+
     return $bestMatch
 }
 
 function Find-AdfsSanHostname {
     param([string[]]$SanNames)
 
+    # 1. Flat convention: 'adfs' (ideally with 'auth') as hyphen segments of a SAN's
+    #    first label, e.g. wids-auth-adfs-abl16.<domain>.
     $best = $null
     $bestScore = -1
-
     foreach ($san in $SanNames) {
+        if ($san.StartsWith('*.')) { continue }
         $firstLabel = ($san -split '\.')[0].ToLowerInvariant()
         $segments   = @($firstLabel -split '-')
         if ($segments -contains 'adfs') {
@@ -266,7 +290,26 @@ function Find-AdfsSanHostname {
             if ($score -gt $bestScore) { $bestScore = $score; $best = $san }
         }
     }
-    return $best
+    if (-not [string]::IsNullOrWhiteSpace($best)) { return $best }
+
+    # 2. Dotted convention: 'adfs' as its own DNS label in a literal SAN, e.g.
+    #    auth.adfs.<domain>.
+    foreach ($san in $SanNames) {
+        if ($san.StartsWith('*.')) { continue }
+        $labels = $san -split '\.'
+        if ($labels.Count -ge 3 -and $labels[1].ToLowerInvariant() -eq 'adfs') { return $san }
+    }
+
+    # 3. Wildcard over the adfs zone, e.g. *.adfs.<domain> -> auth.adfs.<domain>
+    #    (the standard Bastille bn-wids cert). Covered by the wildcard, so valid.
+    foreach ($san in $SanNames) {
+        if (-not $san.StartsWith('*.')) { continue }
+        $suffix = $san.Substring(2)
+        $labels = $suffix -split '\.'
+        if ($labels.Count -ge 2 -and $labels[0].ToLowerInvariant() -eq 'adfs') { return 'auth.' + $suffix }
+    }
+
+    return $null
 }
 
 function Grant-CertPrivateKeyReadAccess {
@@ -590,7 +633,12 @@ try {
     }
 
     if ($missing443) {
-        Set-HttpSysSslBinding -IpPort "0.0.0.0:443" -Thumbprint $thumbprint -AppId '{5d89a20c-beab-4389-8f50-3dba3ec5af60}'
+        # Prefer the appid ADFS already uses on an existing binding; otherwise fall
+        # back to the well-known ADFS HTTPS appid. (The previous literal was not the
+        # ADFS appid.)
+        $adfsAppId = (@($httpSysBindings | Where-Object { $_.AppId }) | Select-Object -First 1).AppId
+        if ([string]::IsNullOrWhiteSpace($adfsAppId)) { $adfsAppId = '{5d89a20c-beab-4389-9447-324788eb944a}' }
+        Set-HttpSysSslBinding -IpPort "0.0.0.0:443" -Thumbprint $thumbprint -AppId $adfsAppId
     }
     elseif ($stale.Count -eq 0) {
         Write-Host "HTTP.SYS bindings are correct." -ForegroundColor Green

@@ -1,14 +1,26 @@
 # Testing suite
 
-Regression tests for `Install-ADFS-pfx-Redirects.ps1`. Run after changing the
-migration script. Each test loads the shipped functions from the migration script
-(the block before `# --- Main ---`) and exercises them directly, so the tests
-verify the *actual* shipped logic rather than a copy.
-
-The tests auto-locate the migration script one directory up (`..\Install-ADFS-pfx-Redirects.ps1`);
-override with `-ScriptPath` if needed.
+Regression tests for the deployment scripts. Each test loads the shipped functions
+from the target script and exercises them directly, so the tests verify the
+*actual* shipped logic rather than a copy. Tests auto-locate the target script one
+directory up; override with `-ScriptPath` if needed.
 
 ## Tests
+
+> `Test-CertScenarios.ps1` and `Test-SiteFeature.ps1` target `Install-ADFS-pfx-Redirects.ps1`; `Test-FromScratch.ps1` targets `Install-ADFS-pfx-From_Scratch.ps1`.
+
+### `Test-FromScratch.ps1` (offline, safe anywhere)
+Validates the SAN-resolution helpers in `Install-ADFS-pfx-From_Scratch.ps1` — the
+functions that pick the federation service name, the per-app hostnames (redirect
+URIs), and the CORS origins from a cert's SANs. Asserts all three resolve correctly
+for **wildcard** (`<d>`, `*.<d>`, `*.adfs.<d>`), **flat per-host**, and **dotted
+literal** (`auth.adfs.<d>`) certs, including the multi-wildcard rule (a deeper
+`*.adfs.<d>` must not splice into app hosts). Makes no changes.
+
+```powershell
+cd testing_suite
+.\Test-FromScratch.ps1
+```
 
 ### `Test-CertScenarios.ps1` (offline, safe anywhere)
 Drives the SAN-based hostname rewriting against two fixture certificates that

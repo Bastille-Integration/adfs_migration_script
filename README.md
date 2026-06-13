@@ -8,7 +8,7 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 | `Install-ADFS-pfx-Redirects.ps1` | Migrate an existing ADFS deployment to a new PFX certificate / domain. |
 | `New-BastilleAdUsers.ps1` | Guided RBAC provisioning of the AD + ADFS identity layer. |
 | `Invoke-AdfsTroubleshoot.ps1` | ADFS health, certificate, and account-lockout diagnostics. |
-| `testing_suite/` | Regression tests for the migration script: `Test-CertScenarios.ps1` (offline, two cert conventions) and `Test-SiteFeature.ps1` (live, self-restoring). See `testing_suite/README.md`. |
+| `testing_suite/` | Regression tests: `Test-CertScenarios.ps1` + `Test-SiteFeature.ps1` (migration script) and `Test-FromScratch.ps1` (from-scratch installer). See `testing_suite/README.md`. |
 | `Show-AdfsConfig.ps1` | Read-only snapshot of the ADFS config (federation props, apps/redirects, CORS, certs, SSL bindings). |
 
 ## What each script does
@@ -21,7 +21,8 @@ PowerShell scripts for standing up, securing, and maintaining ADFS for the Basti
 
 **`Invoke-AdfsTroubleshoot.ps1`** — Day-to-day, read-only diagnostics for an ADFS node: service status, certificate expiry, recent event-log errors, and AD / ADFS extranet account-lockout state. Can list all locked accounts, or target one user and unlock them (both AD and ADFS) in a single pass.
 
-**`testing_suite/`** — Regression tests for `Install-ADFS-pfx-Redirects.ps1`, meant to run after changes to that script. Both load the shipped functions and exercise the real logic. See `testing_suite/README.md` for details.
+**`testing_suite/`** — Regression tests for the deployment scripts, meant to run after changes. Each loads the shipped functions and exercises the real logic. See `testing_suite/README.md` for details.
+- **`Test-FromScratch.ps1`** — Offline; safe anywhere. Validates the SAN-resolution helpers in `Install-ADFS-pfx-From_Scratch.ps1` (federation service name, per-app hostnames, CORS origins) across wildcard, flat per-host, and dotted-literal certs — including the multi-wildcard rule. Makes no changes.
 - **`Test-CertScenarios.ps1`** — Offline; safe anywhere. Drives the SAN-based hostname rewriting against two fixture certificates (`certs/test-flat-oraphys.pfx`, a flat no-wildcard convention; `certs/test-wildcard-acme.pfx`, a standard wildcard convention) starting from a simulated `bn.internal` deployment. Makes no changes and needs no live ADFS. Asserts suffix detection, per-app rewriting, `wti`/`wtiapi` disambiguation, federation-host handling, and `-Site` full-replace/coding.
 - **`Test-SiteFeature.ps1`** — Applies a `-Site` code (default `sitetest`) to the **live** ADFS redirect URIs and CORS origins, prints before/after, runs PASS/FAIL assertions (every app host gains a `<label>-<site>` variant; the ADFS host stays un-coded), then restores the exact prior state in a `finally` block. Run as Administrator on an ADFS node. It does not touch certificates, Federation Service properties, or restart ADFS.
 
